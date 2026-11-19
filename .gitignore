@@ -1,0 +1,14 @@
+# Python (test runner)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Release archives
+*.zip

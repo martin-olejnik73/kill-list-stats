@@ -1,0 +1,15 @@
+## Interface: 16001
+## Title: Kill List Stats
+## Notes: Tracks every player you kill (world / battleground), who kills you and who assists, class stats, and a revenge Kill List.
+## Version: 1.0.0
+## SavedVariables: KillListStatsDB
+## IconTexture: Interface\Icons\INV_Misc_Bone_HumanSkull_01
+## AddonCompartmentFunc: KillListStats_OnAddonCompartmentClick
+## AddonCompartmentFuncOnEnter: KillListStats_OnAddonCompartmentEnter
+## AddonCompartmentFuncOnLeave: KillListStats_OnAddonCompartmentLeave
+
+Core.lua
+Tracker.lua
+Tooltip.lua
+UI.lua
+Commands.lua
