@@ -16,12 +16,17 @@ revenge **Kill List** of the players who killed you while you were leveling.
 - **Assists** go to every other enemy player who damaged you (from the death recap) or was
   targeting you in the last 15 seconds before you died.
 - **Your level and theirs** at the time of death. `??` means the killer was 10+ levels above you.
+- **Your HP when they attacked you**, for the killer and for each assister. It also notes whether
+  you were fighting a mob and how many seconds into the fight they jumped in. If someone opens on
+  you while you're fighting a mob, or while you're already hurt, it counts as a **cheap kill**.
+  Cheap kills show in the Kill List's "Cheap" column and in their tooltip.
 - **Why you died**, built automatically from what happened. For example:
   - `Killer was 8 levels higher (32 vs your 24)`
   - `Outnumbered: 3 enemy players vs you alone`
   - `Dead 3s after combat started` (a gank)
+  - `Opportunist: attacked you at ~50% health while you were fighting Murloc Raider, 8s into the fight`
+  - `Opportunist: attacked you when you were already hurt (~40% health)`
   - `You were also fighting NPCs (Murloc Raider)`
-  - `You were already at ~35% health`
   - `Killing blow by Wolf` (a hunter's pet)
   - `Repeat offender: killed you 2 times before`
 
@@ -47,8 +52,8 @@ revenge **Kill List** of the players who killed you while you were leveling.
   their kills on you and assists, and their Kill List status.
 - **Window**: open it with `/kls` or the addon button next to the minimap. It has five tabs:
   - **Kills**: your kill database. Click a column header to sort, for example by world or BG kills.
-  - **Deaths**: every PvP death, with killer, levels, helpers and the reason. Hover a row to see the
-    last hits you took.
+  - **Deaths**: every PvP death, with killer, levels, your HP when they attacked, helpers and the
+    reason. Hover a row to see the last hits you took, with your HP before each one.
   - **Kill List**: your revenge list. Select a row to remove it or edit its note, or use
     "Add my target".
   - **Classes**: class statistics.
@@ -107,6 +112,12 @@ The addon gets its data from other sources instead:
 Known limits:
 - **Kills are killing blows only.** A kill where someone else landed the killing blow is not
   counted, the same as the "Killing Blows" column on the scoreboard.
+- **HP comes from the death recap.** WoW Forever never lets addons read your live health
+  (`UnitHealth` is always hidden from them). Your HP when someone attacked is worked out after you
+  die, from the recap's health on each hit.
+  - When the recap is cut short and that player was already hitting you before it starts, HP shows
+    as `?`. The addon leaves it unknown rather than guess.
+  - "Fighting a mob" also comes from what you were targeting when they locked onto you.
 - **Assist detection works best with enemy nameplates turned on.** The death recap only covers
   your last few hits, so enemies who hit you earlier are found because they were targeting you.
 - **Battlegrounds**: during an active match the game hides enemy names on units from addons. BG

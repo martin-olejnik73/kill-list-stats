@@ -424,6 +424,13 @@ function ns.ColoredLevel(level, skull, myLevel)
     return "|cff" .. color .. text .. "|r"
 end
 
+-- Health percent text: red when low, orange when hurt.
+function ns.ColoredPct(pct)
+    if not pct then return "|cff808080?|r" end
+    local color = (pct < 35 and "ff2020") or (pct < 70 and "ff9933") or "ffffff"
+    return string.format("|cff%s%d%%|r", color, pct)
+end
+
 function ns.FormatAgo(t)
     if not t then return "never" end
     local d = time() - t

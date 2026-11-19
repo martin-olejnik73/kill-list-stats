@@ -340,6 +340,9 @@ local deathColumns = {
     { key = "klevel", title = "Lvl", width = 34, align = "CENTER", sort = function(r) return r.d.killerSkull and 999 or (r.d.killerLevel or 0) end, text = function(r)
         return ns.ColoredLevel(r.d.killerLevel, r.d.killerSkull, r.d.myLevel)
     end, tip = "The killer's level (red = much higher than you, ?? = 10+ levels above you)." },
+    { key = "hp", title = "HP", width = 40, align = "CENTER", sort = function(r) return r.d.killerHP or 999 end, text = function(r)
+        return ns.ColoredPct(r.d.killerHP)
+    end, tip = "Your health when the killer started attacking you (from the death recap). Red = you were already hurt. ? = unknown." },
     { key = "assists", title = "Help", width = 40, align = "CENTER", sort = function(r) return r.d.assists and #r.d.assists or 0 end, text = function(r)
         local n = r.d.assists and #r.d.assists or 0
         return n > 0 and (RED .. "+" .. n .. "|r") or (GREY .. "solo|r")
@@ -355,6 +358,9 @@ local listColumns = {
     { key = "level", title = "Lvl", width = 34, align = "CENTER", sort = function(r) return LevelOf(r.p) end, text = function(r) return ns.FormatLevel(r.p.level) end },
     { key = "deaths", title = "Killed you", width = 66, align = "RIGHT", sort = function(r) return r.deaths end, text = function(r) return r.deaths > 0 and (RED .. r.deaths .. "|r") or (GREY .. "-|r") end },
     { key = "assists", title = "Assists", width = 52, align = "RIGHT", sort = function(r) return r.assists end, text = function(r) return NumOrDash(r.assists) end },
+    { key = "cheap", title = "Cheap", width = 44, align = "RIGHT", sort = function(r) return r.p.cheap or 0 end, text = function(r)
+        return (r.p.cheap or 0) > 0 and (RED .. r.p.cheap .. "|r") or (GREY .. "-|r")
+    end, tip = "Cheap kills: times they killed you after jumping in while you were fighting a mob or already hurt." },
     { key = "kills", title = "Your kills", width = 64, align = "RIGHT", sort = function(r) return r.kills end, text = function(r) return r.kills > 0 and (GREEN .. r.kills .. "|r") or (GREY .. "-|r") end },
     { key = "balance", title = "Score", width = 46, align = "RIGHT", sort = function(r) return r.kills - r.deaths end, text = function(r)
         local b = r.kills - r.deaths
@@ -412,14 +418,20 @@ local function DeathTooltip(r)
     if d.kbSpell then
         GameTooltip:AddDoubleLine("Killing blow", d.kbSpell .. (d.kbAmount and (" (" .. d.kbAmount .. ")") or ""), 0.7, 0.7, 0.7, 1, 1, 1)
     end
+    GameTooltip:AddDoubleLine("Your HP when they attacked", ns.ColoredPct(d.killerHP), 0.7, 0.7, 0.7, 1, 1, 1)
+    if d.engage then
+        GameTooltip:AddLine((d.cheap and (RED .. "Cheap shot:|r ") or "") .. "They " .. d.engage, 1, 1, 1, true)
+    end
     if d.assists and #d.assists > 0 then
         GameTooltip:AddLine(" ")
         GameTooltip:AddLine("Assists:", 1, 0.82, 0)
         for _, a in ipairs(d.assists) do
             local ap = ns.db.players[a.key]
             local how = {}
+            if a.hp then how[#how + 1] = "joined at " .. ns.ColoredPct(a.hp) .. " HP" end
+            if a.npc then how[#how + 1] = "while you fought " .. a.npc end
             if a.dmg then how[#how + 1] = a.dmg .. " dmg" end
-            if a.targeted then how[#how + 1] = "was targeting you" end
+            if a.targeted and not a.dmg then how[#how + 1] = "was targeting you" end
             GameTooltip:AddDoubleLine(string.format("  %s (%s %s)", ap and ns.ColoredName(ap) or a.key,
                 ns.ColoredLevel(a.level, a.skull, d.myLevel), ns.ClassName(a.class)), table.concat(how, ", "), 1, 1, 1, 0.7, 0.7, 0.7)
         end
@@ -433,7 +445,8 @@ local function DeathTooltip(r)
         GameTooltip:AddLine(" ")
         GameTooltip:AddLine("Last hits taken (newest first):", 1, 0.82, 0)
         for _, h in ipairs(d.recap) do
-            GameTooltip:AddDoubleLine("  " .. (h.src or "?") .. ": " .. (h.spell or "?"), h.amount and tostring(h.amount) or "", 0.9, 0.9, 0.9, 1, 0.4, 0.4)
+            local right = (h.amount and tostring(h.amount) or "") .. (h.hp and ("  " .. GREY .. "at|r " .. ns.ColoredPct(h.hp)) or "")
+            GameTooltip:AddDoubleLine("  " .. (h.src or "?") .. ": " .. (h.spell or "?"), right, 0.9, 0.9, 0.9, 1, 0.4, 0.4)
         end
     end
 end

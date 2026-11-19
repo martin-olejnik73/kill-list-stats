@@ -24,6 +24,9 @@ function ns.AddPlayerLines(tt, p, detailed)
         if assists > 0 then
             tt:AddDoubleLine(RED .. "Assisted on your deaths|r", tostring(assists), 1, 1, 1, 1, 1, 1)
         end
+        if (p.cheap or 0) > 0 then
+            tt:AddDoubleLine(RED .. "Cheap kills on you|r", tostring(p.cheap) .. GREY .. "  (jumped you while busy/hurt)|r", 1, 1, 1, 1, 1, 1)
+        end
     end
     if p.list then
         local text = p.list.note or p.list.reason or "on your Kill List"

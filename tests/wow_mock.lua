@@ -84,6 +84,7 @@ function UnitIsUnit(a, b)
     return a == b
 end
 function UnitAffectingCombat() return false end
+function UnitPlayerControlled(unit) local u = U(unit); return u ~= nil and (u.isPlayer or u.playerControlled) == true end
 function IsInGroup() return MOCK.group ~= nil end
 function GetNumGroupMembers() return MOCK.group or 0 end
 

@@ -78,21 +78,29 @@ check(fr and fr.kills.bg == 1 and fr.kills.world == 0, "BG kill counted under BG
 MOCK.instanceType, MOCK.zone = nil, nil
 
 ---------------------------------------------------------------------------
-section("world death: killer, assists, explanation")
+section("world death: fighting a mob at 50% HP when two players jump in")
+-- You are fighting a Murloc; 8 seconds into the fight Bully and Helper lock onto you.
+MOCK.units.target = { name = "Murloc Raider", isPlayer = false, enemy = true }
+MOCK.Fire("PLAYER_REGEN_DISABLED")
+MOCK.Advance(8)
 enemy("nameplate1", "Player-1-CCC", "Bully", "WARRIOR", 30, { targetingMe = true, guild = "Gankers" })
 enemy("nameplate2", "Player-1-DDD", "Helper", "MAGE", 25, { targetingMe = true })
 enemy("nameplate3", "Player-1-EEE", "Bystander", "HUNTER", 20, { targetingMe = false })
-MOCK.Fire("PLAYER_REGEN_DISABLED")
+MOCK.Fire("UNIT_TARGET", "nameplate1")
+MOCK.Fire("UNIT_TARGET", "nameplate2")
+MOCK.Fire("UNIT_TARGET", "nameplate3")
 MOCK.Advance(3)
+-- max health 1000; recap health is "after the hit" (0 on the killing blow)
 MOCK.recap = {
-    { event = "SWING_DAMAGE", sourceName = "Bully", amount = 300, currentHP = 0, timestamp = 10.0 },
-    { event = "SPELL_DAMAGE", sourceName = "Helper", spellName = "Frostbolt", amount = 200, currentHP = 300, timestamp = 9.5 },
-    { event = "SPELL_DAMAGE", sourceName = "Bully", spellName = "Mortal Strike", amount = 400, currentHP = 500, timestamp = 9.0 },
-    { event = "SWING_DAMAGE", sourceName = "Murloc Raider", amount = 50, currentHP = 450, timestamp = 8.0 },
+    { event = "SWING_DAMAGE", sourceName = "Bully", amount = 100, currentHP = 0, timestamp = 10.0 },
+    { event = "SPELL_DAMAGE", sourceName = "Helper", spellName = "Frostbolt", amount = 150, currentHP = 100, timestamp = 9.5 },
+    { event = "SPELL_DAMAGE", sourceName = "Bully", spellName = "Mortal Strike", amount = 250, currentHP = 250, timestamp = 9.0 },
+    { event = "SWING_DAMAGE", sourceName = "Murloc Raider", amount = 300, currentHP = 500, timestamp = 8.0 },
 }
 MOCK.Fire("PLAYER_DEAD")
 MOCK.Fire("PLAYER_REGEN_ENABLED")
 MOCK.Advance(1)
+MOCK.units.target = nil
 local bully, helper = ns.db.players["Bully-MyRealm"], ns.db.players["Helper-MyRealm"]
 check(#ns.db.deaths == 1, "death recorded")
 check(bully and bully.deaths.world == 1, "killer credited with the killing blow")
@@ -106,9 +114,14 @@ print("    why> " .. why)
 check(d.killerLevel == 30 and d.myLevel == 20, "levels stored (30 vs 20)")
 check(why:find("10 levels higher", 1, true) ~= nil, "explains level gap")
 check(why:find("Outnumbered: 2 enemy players vs you alone", 1, true) ~= nil, "explains outnumbered")
-check(why:find("Murloc Raider", 1, true) ~= nil, "explains NPCs involved")
-check(why:find("Dead 3s after combat started", 1, true) ~= nil, "explains quick death")
-check(why:find("~50% health", 1, true) ~= nil, "explains low starting health")
+check(why:find("Opportunist: attacked you at ~50% health while you were fighting Murloc Raider, 8s into the fight", 1, true) ~= nil,
+    "explains: jumped in at 50% HP while you fought the mob, 8s in")
+check(not why:find("You were also fighting NPCs", 1, true), "mob not mentioned twice")
+check(d.killerHP == 50 and d.cheap == true and d.killerNPC == "Murloc Raider", "death stores your HP when the killer attacked")
+check(bully.cheap == 1, "killer gets a cheap kill")
+check(d.assists[1].hp == 25 and d.assists[1].npc == "Murloc Raider", "assister's join HP stored (25%)")
+check(d.recap[3].hp == 50 and d.recap[4].hp == 80, "HP before each recap hit stored")
+check(bully.list.reason:find("while you were fighting Murloc Raider", 1, true) ~= nil, "Kill List reason mentions the cheap shot")
 check(d.kbSpell == "Melee", "killing blow spell stored")
 check(chatContains("Killed by Bully (30 Warrior) with Melee"), "death printed to chat")
 
@@ -209,8 +222,50 @@ check(okBG, "no errors with secret unit values")
 check(fr.deaths.bg == 1 and fr.list == nil, "BG killer credited (BG kills don't auto-list by default)")
 local rg = ns.db.players["Randomguy-OtherRealm"]
 check(rg and rg.assists.bg == 1, "BG assist from recap name")
+local bgd = ns.db.deaths[#ns.db.deaths]
+local bgwhy = table.concat(bgd.reasons, " | ")
+print("    why> " .. bgwhy)
+check(bgwhy:find("Dead 2s after combat started", 1, true) ~= nil, "explains quick death")
+check(bgd.killerHP == 50 and not bgd.cheap, "HP noted; second attacker after another player is not a cheap shot")
 MOCK.instanceType, MOCK.zone = nil, nil
 MOCK.units.nameplate5 = nil
+
+section("already hurt, no mob: player opens on you at 40% HP")
+enemy("nameplate6", "Player-1-HHH", "Vulture", "ROGUE", 21, { targetingMe = true })
+MOCK.Advance(60)
+MOCK.Fire("PLAYER_REGEN_DISABLED")
+MOCK.Advance(4)
+MOCK.recap = {
+    { event = "SPELL_DAMAGE", sourceName = "Vulture", spellName = "Eviscerate", amount = 200, currentHP = 0 },
+    { event = "SPELL_DAMAGE", sourceName = "Vulture", spellName = "Ambush", amount = 200, currentHP = 200 },
+}
+MOCK.Fire("PLAYER_DEAD")
+MOCK.Fire("PLAYER_REGEN_ENABLED")
+MOCK.Advance(1)
+local vd = ns.db.deaths[#ns.db.deaths]
+print("    why> " .. table.concat(vd.reasons, " | "))
+check(vd.killerHP == 40 and vd.cheap, "short recap covers the whole fight: 40% HP and a cheap shot")
+check(table.concat(vd.reasons, "|"):find("Opportunist: attacked you when you were already hurt (~40% health)", 1, true) ~= nil,
+    "explains: already hurt")
+MOCK.units.nameplate6 = nil
+
+section("recap cut short: HP unknown")
+enemy("nameplate6", "Player-1-JJJ", "Longfight", "WARRIOR", 22, { targetingMe = true })
+MOCK.Advance(60)
+MOCK.Fire("PLAYER_REGEN_DISABLED")
+MOCK.Advance(20)
+MOCK.recap = {
+    { event = "SWING_DAMAGE", sourceName = "Longfight", amount = 100, currentHP = 0 },
+    { event = "SWING_DAMAGE", sourceName = "Longfight", amount = 100, currentHP = 100 },
+    { event = "SWING_DAMAGE", sourceName = "Longfight", amount = 100, currentHP = 200 },
+    { event = "SWING_DAMAGE", sourceName = "Longfight", amount = 100, currentHP = 300 },
+}
+MOCK.Fire("PLAYER_DEAD")
+MOCK.Fire("PLAYER_REGEN_ENABLED")
+MOCK.Advance(1)
+local ld = ns.db.deaths[#ns.db.deaths]
+check(ld.killer == "Longfight-MyRealm" and ld.killerHP == nil and not ld.cheap and not ld.engage, "full-length recap from one player: HP left unknown, not called cheap")
+MOCK.units.nameplate6 = nil
 
 ---------------------------------------------------------------------------
 section("tooltip")
@@ -280,7 +335,7 @@ local okUI, err = pcall(function()
         end
     end
     check(#UI.pages[1].list == 3, "Kills tab lists 3 victims")
-    check(#UI.pages[2].list == 3, "Deaths tab lists 3 deaths")
+    check(#UI.pages[2].list == 5, "Deaths tab lists 5 deaths")
     check(#UI.pages[3].list >= 2, "Kill List tab lists listed players")
     check(#UI.pages[4].list >= 3, "Classes tab lists classes")
     print("    summary> " .. UI.summary:GetText():gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""))

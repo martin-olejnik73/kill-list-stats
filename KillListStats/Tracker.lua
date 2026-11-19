@@ -93,8 +93,20 @@ local function PlateGone(unit)
     end
 end
 
+-- The NPC you are fighting right now (your attackable non-player target), if any.
+local function CurrentNPCTarget()
+    if not combatStart or not UnitExists("target") or UnitIsPlayer("target") then return nil end
+    if not Plain(UnitCanAttack("player", "target")) then return nil end
+    if Plain(Try(UnitPlayerControlled, "target")) then return nil end -- someone's pet
+    return PlainString(Try(UnitName, "target"))
+end
+
+local ENGAGE_RESET = 15 -- seconds without targeting you before it counts as a new engagement
+
 -- Reads a unit; remembers enemy players, warns about Kill List players and
 -- notes enemies that are targeting you (they get assists if you die soon).
+-- When an enemy first locks onto you, remembers what you were doing: how long
+-- you had been in combat and which mob you were fighting.
 local function Observe(unit)
     local ok, info, p = pcall(ns.ObserveUnit, ns, unit)
     if not ok or not info then return end
@@ -102,11 +114,19 @@ local function Observe(unit)
 
     local ok2, isMe = pcall(UnitIsUnit, unit .. "target", "player")
     if ok2 and Plain(isMe) == true then
+        local now = GetTime()
         local a = attackers[info.key]
-        if a then
-            a.info, a.t = info, GetTime()
+        -- Same engagement unless that entry is from an earlier, separate fight.
+        local stale = a and ((combatStart and a.t < combatStart - 5)
+            or (not combatStart and now - a.t > ENGAGE_RESET))
+        if a and not stale then
+            a.info, a.t = info, now
         else
-            attackers[info.key] = { info = info, t = GetTime(), first = GetTime() }
+            attackers[info.key] = {
+                info = info, t = now, first = now,
+                combatFor = combatStart and (now - combatStart) or nil,
+                npc = ns.Try(CurrentNPCTarget),
+            }
         end
     end
 end
@@ -344,11 +364,12 @@ function tracker:PLAYER_DEAD()
 
     pcall(Scan)
     local window = ns.db.settings.assistWindow or 15
-    local targeters = {}
+    local targeters, engage = {}, {}
     for key, a in pairs(attackers) do
         if now - a.t <= window then
             targeters[key] = a.info
             a.info.targetedAt = a.t
+            engage[key] = { combatFor = a.combatFor, npc = a.npc }
         end
     end
 
@@ -361,6 +382,7 @@ function tracker:PLAYER_DEAD()
         group = IsInGroup() and math.max(GetNumGroupMembers(), 1) or 1,
         combatTime = combatTime,
         targeters = targeters,
+        engage = engage,
     }
     ns.Debug("PLAYER_DEAD", ctx, "targeting you:", ns.CountKeys(targeters))
     C_Timer.After(0.4, function() ns:ProcessDeath(ev, 1) end)
@@ -415,12 +437,77 @@ function ns:ProcessDeath(ev, attempt)
             inv.hits = inv.hits + 1
             inv.spell = inv.spell or r.spell
             if i == 1 then inv.kb = true end
+            inv.firstIdx = i -- the recap is newest first, so this ends on their oldest hit
         end
     end
     for key, info in pairs(ev.targeters) do
         local inv = Involve(info, false)
         inv.targeted = true
         inv.lastT = info.targetedAt
+    end
+
+    -- 2b) Your health when each of them started hitting you, and what you
+    -- were doing at that moment (fighting a mob? how long into the fight?).
+    local maxHP = PlainNumber(Try(C_DeathRecap and C_DeathRecap.GetRecapMaxHealth))
+    -- The killing blow tells us how the recap stores health: 0 means "health
+    -- after the hit", anything else means "health before the hit".
+    local hpAfterHit = not (recs[1] and recs[1].hp and recs[1].hp > 0)
+    -- The recap only keeps your last N hits. If this one is shorter than the
+    -- longest seen so far, it holds the whole fight.
+    local recapCap = self.db.recapMax or 0
+    local recapComplete = recapCap >= 3 and #recs < recapCap
+    self.db.recapMax = math.max(recapCap, #recs)
+    local function HpBefore(r)
+        if not r or not r.hp or not maxHP or maxHP <= 0 then return nil end
+        local hp = r.hp
+        if hpAfterHit then hp = hp + (r.amount or 0) end
+        return math.max(0, math.min(100, math.floor(hp / maxHP * 100 + 0.5)))
+    end
+    for key, inv in pairs(involved) do
+        local e = ev.engage[key]
+        if e then
+            inv.join = e.combatFor
+            inv.npc = e.npc
+        end
+        if inv.firstIdx then
+            local olderPlayer, olderNPC = false, nil
+            for j = inv.firstIdx + 1, #recs do
+                local o = recs[j]
+                if o.kind == "player" then
+                    olderPlayer = true
+                elseif o.kind == "npc" and o.src and not olderNPC then
+                    olderNPC = o.src
+                end
+            end
+            inv.firstPlayer = not olderPlayer
+            inv.npc = olderNPC or inv.npc
+            -- Only trust it if older hits exist or the recap covers the whole
+            -- fight; otherwise they may have hit you before the recap window.
+            if inv.firstIdx < #recs or recapComplete then
+                inv.hp = HpBefore(recs[inv.firstIdx])
+            end
+        end
+    end
+
+    -- Describes how a player engaged you. Returns text and whether it was a cheap shot.
+    local function Engagement(inv)
+        local text, cheap
+        if inv.npc then
+            text = "attacked you" .. (inv.hp and string.format(" at ~%d%% health", inv.hp) or "") ..
+                " while you were fighting " .. inv.npc
+            cheap = true
+        elseif inv.hp and inv.hp <= 60 and inv.firstPlayer then
+            text = string.format("attacked you when you were already hurt (~%d%% health)", inv.hp)
+            cheap = true
+        elseif inv.hp then
+            text = string.format("attacked you at ~%d%% health", inv.hp)
+        elseif inv.join and inv.join >= 5 then
+            text = "joined a fight you were already in"
+        end
+        if text and inv.join and inv.join >= 3 then
+            text = text .. string.format(", %ds into the fight", math.floor(inv.join + 0.5))
+        end
+        return text, cheap
     end
 
     -- 3) Pick the killer.
@@ -482,6 +569,15 @@ function ns:ProcessDeath(ev, attempt)
         end
     end
 
+    local engageText, cheap = Engagement(killer)
+    if engageText then
+        if cheap then
+            reasons[#reasons + 1] = "Opportunist: " .. engageText
+        else
+            reasons[#reasons + 1] = (engageText:gsub("^%l", string.upper))
+        end
+    end
+
     if ev.combatTime and ev.combatTime <= 8 then
         reasons[#reasons + 1] = string.format("Dead %.0fs after combat started", math.max(ev.combatTime, 1))
     end
@@ -490,17 +586,8 @@ function ns:ProcessDeath(ev, attempt)
     for _, r in ipairs(recs) do
         if r.kind == "npc" and r.src then npcName = r.src break end
     end
-    if npcName then
+    if npcName and not killer.npc then
         reasons[#reasons + 1] = "You were also fighting NPCs (" .. npcName .. ")"
-    end
-
-    local maxHP = PlainNumber(Try(C_DeathRecap and C_DeathRecap.GetRecapMaxHealth))
-    local oldest = recs[#recs]
-    if maxHP and maxHP > 0 and oldest and oldest.hp and oldest.amount then
-        local pct = math.min(100, math.floor((oldest.hp + oldest.amount) / maxHP * 100 + 0.5))
-        if pct > 0 and pct < 60 then
-            reasons[#reasons + 1] = string.format("You were already at ~%d%% health", pct)
-        end
     end
 
     if kbOther then reasons[#reasons + 1] = "Killing blow by " .. kbOther end
@@ -520,9 +607,11 @@ function ns:ProcessDeath(ev, attempt)
             ap.lastAssist = ev.t
             ap.lastSeen = math.max(ap.lastSeen or 0, ev.t)
             ap.lastSeenZone = ev.zone
+            local aText, aCheap = Engagement(inv)
             assists[#assists + 1] = {
                 key = inv.key, class = ap.class, level = (inv.info.level and inv.info.level > 0) and inv.info.level or ap.level,
                 skull = inv.info.skull, dmg = inv.dmg > 0 and inv.dmg or nil, targeted = inv.targeted or nil,
+                hp = inv.hp, npc = inv.npc, join = inv.join, cheap = aCheap or nil, engage = aText,
             }
             if ev.ctx == "world" and db.settings.autoListWorldAssists then
                 self:AddToKillList(ap, string.format("Helped kill you at level %s in %s", tostring(myLevel), ev.zone or "?"), true)
@@ -533,7 +622,7 @@ function ns:ProcessDeath(ev, attempt)
     local recapSave = {}
     for i = 1, math.min(#recs, 10) do
         local r = recs[i]
-        recapSave[i] = { src = r.src, spell = r.spell, amount = r.amount, kind = r.kind }
+        recapSave[i] = { src = r.src, spell = r.spell, amount = r.amount, kind = r.kind, hp = HpBefore(r) }
     end
 
     local death = {
@@ -542,11 +631,14 @@ function ns:ProcessDeath(ev, attempt)
         killer = killer.key, killerClass = kp.class, killerLevel = kLevel, killerSkull = kSkull,
         kbSpell = killer.kb and kbRec and kbRec.spell or killer.spell, kbAmount = killer.kb and kbRec and kbRec.amount or nil,
         kbOther = kbOther, guessed = guessed, enemies = enemies,
+        killerHP = killer.hp, killerNPC = killer.npc, killerJoin = killer.join,
+        cheap = cheap or nil, engage = engageText,
         assists = assists, reasons = reasons, recap = recapSave,
     }
     self:AppendLog(db.deaths, death)
 
     kp.deaths[ev.ctx] = (kp.deaths[ev.ctx] or 0) + 1
+    if cheap then kp.cheap = (kp.cheap or 0) + 1 end
     kp.lastDeath = ev.t
     kp.lastDeathZone = ev.zone
     kp.lastSeen = math.max(kp.lastSeen or 0, ev.t)
@@ -555,6 +647,7 @@ function ns:ProcessDeath(ev, attempt)
 
     local summary = string.format("Killed you at level %s in %s%s", tostring(myLevel), ev.zone or "?",
         kLevel and string.format(" (they were %d)", kLevel) or (kSkull and " (they were ??)" or ""))
+    if cheap then summary = summary .. "; " .. engageText end
     local added
     if (ev.ctx == "world" and db.settings.autoListWorldKillers) or (ev.ctx == "bg" and db.settings.autoListBGKillers) then
         added = self:AddToKillList(kp, summary, true)
