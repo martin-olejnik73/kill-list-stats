@@ -23,6 +23,7 @@ ns.DEFAULT_SETTINGS = {
     autoListWorldAssists = false, -- world assisters go on the Kill List too
     autoListBGKillers = false,    -- battleground killers go on the Kill List
     assistWindow = 15,            -- seconds: enemies targeting you this recently get an assist
+    countSharedKills = true,      -- also count kills your group, a totem, an NPC or the environment finished
     logLimit = 3000,              -- max entries kept in each history log
     debug = false,
 }
@@ -118,17 +119,40 @@ local function CopyDefaults(dst, src)
     return dst
 end
 
+ns.DB_VERSION = 2
+
 function ns:InitDB()
     KillListStatsDB = KillListStatsDB or {}
     local db = KillListStatsDB
-    db.version = db.version or 1
     db.players = db.players or {}   -- "Name-Realm" -> player record
     db.guids = db.guids or {}       -- player GUID -> "Name-Realm"
     db.deaths = db.deaths or {}     -- PvP death log (oldest first)
     db.kills = db.kills or {}       -- kill log (oldest first)
+    db.unresolved = db.unresolved or {} -- kills whose victim's name was hidden (battlegrounds)
     db.settings = CopyDefaults(db.settings or {}, ns.DEFAULT_SETTINGS)
     db.ui = db.ui or {}
+    self:Migrate(db)
     self.db = db
+end
+
+-- Upgrades saved data from older versions.
+function ns:Migrate(db)
+    local version = db.version or (next(db.players) and 1 or ns.DB_VERSION)
+    if version < 2 then
+        -- Version 1 only counted your own killing blows and did not record your
+        -- group, so every old kill is your killing blow (or your pet's), solo.
+        for _, k in ipairs(db.kills or {}) do
+            if not k.blow then k.blow = k.pet and "pet" or "me" end
+            if not k.group then k.group, k.gsize = "solo", 1 end
+            if not k.how then k.how = "kb" end
+        end
+        for _, p in pairs(db.players or {}) do
+            local n = ns.Total(p.kills)
+            if p.kb == nil then p.kb = n end
+            if p.solo == nil then p.solo = n end
+        end
+    end
+    db.version = ns.DB_VERSION
 end
 
 function ns:ResetData()
@@ -137,6 +161,7 @@ function ns:ResetData()
     wipe(db.guids)
     wipe(db.deaths)
     wipe(db.kills)
+    wipe(db.unresolved)
     self:NotifyChanged()
 end
 
@@ -170,7 +195,9 @@ function ns:GetPlayer(key, create, name, realm)
         p = {
             name = name,
             realm = realm or ns.MyRealm(),
-            kills = Counter(),    -- your killing blows on them
+            kills = Counter(),    -- your kills on them (any killing blow, see p.kb)
+            kb = 0,               -- of those: killing blows by you, your pet or your totem
+            solo = 0,             -- of those: kills while you were not in a party or raid
             deaths = Counter(),   -- their killing blows on you
             assists = Counter(),  -- times they helped kill you
             revenge = 0,          -- kills on them while they were on your Kill List
@@ -354,6 +381,84 @@ function ns.GetContext()
         return "bg", instanceType
     end
     return "world", instanceType
+end
+
+ns.HOME_GROUP = LE_PARTY_CATEGORY_HOME or 1         -- the party/raid you formed yourself
+ns.INSTANCE_GROUP = LE_PARTY_CATEGORY_INSTANCE or 2 -- the raid a battleground puts you in
+
+-- Your own group: "solo", "party" or "raid", and its size. A battleground raid
+-- you were put into does not count; only a party you formed (or queued with) does.
+function ns.GroupState()
+    if not ns.Plain(ns.Try(IsInGroup, ns.HOME_GROUP)) then return "solo", 1 end
+    local n = ns.PlainNumber(ns.Try(GetNumGroupMembers, ns.HOME_GROUP)) or 2
+    if ns.Plain(ns.Try(IsInRaid, ns.HOME_GROUP)) then return "raid", math.max(n, 2) end
+    return "party", math.max(n, 2)
+end
+
+-- Your group when you died. Deaths saved before version 2 only stored a group
+-- size, which inside battlegrounds is the battleground raid, so those count as solo.
+function ns.DeathGroup(d)
+    if d.party then return d.party, d.psize or 1 end
+    local n = d.group or 1
+    if d.ctx == "world" and n > 1 then return n > 5 and "raid" or "party", n end
+    return "solo", 1
+end
+
+-- Kill log entries: who landed the killing blow.
+--   "me", "pet"      you or your pet
+--   "summon"         a totem/guardian (yours when solo, someone in your group's otherwise)
+--   "party", "team"  someone in your own group / a battleground teammate (e.blowBy = name)
+--   "other"          nobody in your group: an NPC, a guard, the environment
+function ns.BlowKind(e)
+    local b = e.blow or (e.pet and "pet") or "me"
+    if b == "me" or b == "pet" or (b == "summon" and (e.group or "solo") == "solo") then return "mine" end
+    if b == "summon" then return "party" end
+    return b
+end
+
+function ns.IsOwnBlow(e) return ns.BlowKind(e) == "mine" end
+
+function ns.BlowText(e)
+    local b = e.blow or (e.pet and "pet") or "me"
+    if b == "me" then return "You" end
+    if b == "pet" then return "Your pet" end
+    if b == "summon" then
+        return (e.group or "solo") == "solo" and "Your totem/summon" or "A group summon"
+    end
+    if b == "party" or b == "team" then
+        local who = e.blowBy or (b == "party" and "Group member" or "Teammate")
+        if e.blowPet then who = who .. "'s pet" end
+        local tag = b == "team" and "team" or (e.group == "raid" and "raid" or "party")
+        return who .. " (" .. tag .. ")"
+    end
+    return "NPC / other"
+end
+
+local BLOW_COLORS = { mine = "|cff40ff40", party = "|cffffd100", team = "|cff60a0ff", other = "|cffaaaaaa" }
+function ns.ColoredBlow(e)
+    return (BLOW_COLORS[ns.BlowKind(e)] or "") .. ns.BlowText(e) .. "|r"
+end
+
+function ns.GroupText(state, size)
+    if state == "party" then return "Party of " .. (size or 2) end
+    if state == "raid" then return "Raid of " .. (size or 2) end
+    return "Solo"
+end
+
+-- Why a kill counted, from a kill log entry's "how" field.
+local HOW_TEXT = {
+    kb = "killing-blow event",
+    honor = "honorable kill",
+    fought = "you were fighting them",
+    meter = "your damage (damage meter)",
+    died = "saw them die",
+}
+function ns.HowText(how)
+    local parts = {}
+    for code in tostring(how or "kb"):gmatch("[^,]+") do
+        parts[#parts + 1] = HOW_TEXT[code] or code
+    end
+    return table.concat(parts, ", ")
 end
 
 ---------------------------------------------------------------------------

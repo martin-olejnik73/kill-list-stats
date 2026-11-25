@@ -366,6 +366,337 @@ local okUI, err = pcall(function()
 end)
 check(okUI, "UI code ran without errors" .. (okUI and "" or (": " .. tostring(err))))
 
+---------------------------------------------------------------------------
+-- Kill detection: killing blows by others, honorable kills, damage meter
+---------------------------------------------------------------------------
+ns.db.settings.printKills = true
+local function kills(key) local p = ns.db.players[key]; return p and ns.Total(p.kills) or 0 end
+local function lastKill() return ns.db.kills[#ns.db.kills] end
+local function clearUnits()
+    for u in pairs(MOCK.units) do if u ~= "player" then MOCK.units[u] = nil end end
+end
+local function victim(guid, name, class, level, realm)
+    MOCK.guidInfo[guid] = { name = name, class = class, className = class, race = "Orc", level = level, realm = realm or "" }
+end
+clearUnits()
+MOCK.Advance(30)
+
+section("migration: old kills become solo kills with your own killing blow")
+local old = {
+    version = 1,
+    players = { ["Old-MyRealm"] = { name = "Old", realm = "MyRealm", kills = { world = 2, bg = 1 }, deaths = { world = 0, bg = 0 }, assists = { world = 0, bg = 0 } } },
+    kills = { { t = 1, key = "Old-MyRealm", ctx = "world" }, { t = 2, key = "Old-MyRealm", ctx = "world", pet = true }, { t = 3, key = "Old-MyRealm", ctx = "bg" } },
+    deaths = {},
+}
+ns:Migrate(old)
+check(old.version == 2, "data upgraded to version 2")
+check(old.kills[1].blow == "me" and old.kills[2].blow == "pet" and old.kills[3].group == "solo" and old.kills[3].gsize == 1,
+    "old kills: your (or your pet's) killing blow, solo")
+check(old.players["Old-MyRealm"].kb == 3 and old.players["Old-MyRealm"].solo == 3, "old player totals: all your killing blows, all solo")
+check(ns.DeathGroup({ ctx = "world", group = 3 }) == "party" and ns.DeathGroup({ ctx = "bg", group = 15 }) == "solo",
+    "old deaths: world group size kept, battleground raid counts as solo")
+
+section("party member lands the killing blow (world, you in combat)")
+MOCK.group = 3
+MOCK.units.party1 = { guid = "Player-1-BUD", name = "Buddy", isPlayer = true }
+MOCK.units.party2 = { guid = "Player-1-PAL", name = "Pal", isPlayer = true }
+MOCK.units.partypet1 = { guid = "Pet-0-1-2-3-4-55", name = "Fluffy" }
+victim("Player-1-KA1", "Partyvictim", "MAGE", 21)
+MOCK.Fire("PLAYER_REGEN_DISABLED")
+MOCK.Fire("PARTY_KILL", "Player-1-BUD", "Player-1-KA1")
+check(kills("Partyvictim-MyRealm") == 0, "a group kill waits a moment for more signals")
+MOCK.Advance(2)
+local pv = ns.db.players["Partyvictim-MyRealm"]
+local e = lastKill()
+check(pv and pv.kills.world == 1, "party member's killing blow counted (you were in the fight)")
+check(e.blow == "party" and e.blowBy == "Buddy", "kill log: Buddy landed the killing blow")
+check(e.group == "party" and e.gsize == 3 and e.with and #e.with == 2, "kill log: party of 3, with Buddy and Pal")
+check(pv.kb == 0 and pv.solo == 0, "not your killing blow, not solo")
+check(chatContains("killing blow: Buddy (party) [party of 3]"), "chat says who landed the killing blow and your group")
+
+section("party member's pet lands the killing blow")
+victim("Player-1-KA2", "Petvictim", "MAGE", 21)
+MOCK.Fire("PARTY_KILL", "Pet-0-1-2-3-4-55", "Player-1-KA2")
+MOCK.Advance(2)
+e = lastKill()
+check(e.key == "Petvictim-MyRealm" and e.blow == "party" and e.blowBy == "Buddy" and e.blowPet, "party pet's killing blow credited to Buddy's pet")
+check(ns.BlowText(e) == "Buddy's pet (party)", "shown as \"Buddy's pet (party)\"")
+
+section("your own killing blow while grouped")
+victim("Player-1-KA3", "Ownvictim", "ROGUE", 20)
+MOCK.Fire("PARTY_KILL", ME, "Player-1-KA3")
+e = lastKill()
+local ov = ns.db.players["Ownvictim-MyRealm"]
+check(e.key == "Ownvictim-MyRealm" and e.blow == "me" and e.group == "party", "own killing blow counted at once, with your party")
+check(ov.kb == 1 and ov.solo == 0, "your killing blow, not solo")
+MOCK.Fire("PLAYER_REGEN_ENABLED")
+MOCK.group = nil
+clearUnits()
+MOCK.Advance(10)
+
+section("solo: your totem lands the killing blow")
+victim("Player-1-KA4", "Totemvictim", "WARRIOR", 22)
+MOCK.Fire("PARTY_KILL", "Creature-0-1-2-3-2523-77", "Player-1-KA4")
+MOCK.Advance(2)
+e = lastKill()
+check(e.key == "Totemvictim-MyRealm" and e.blow == "summon" and ns.IsOwnBlow(e), "solo totem/summon kill counts as your killing blow")
+check(chatContains("[totem/summon]"), "chat marks the totem kill")
+
+section("solo: they fought you, then a guard finished them")
+enemy("nameplate1", "Player-1-KA5", "Guardbait", "ROGUE", 24, { targetingMe = true })
+MOCK.Fire("PLAYER_REGEN_DISABLED")
+MOCK.Fire("UNIT_TARGET", "nameplate1")
+MOCK.Advance(5)
+MOCK.units.nameplate1.dead = true
+MOCK.Fire("UNIT_DIED", "Player-1-KA5")
+MOCK.Advance(2)
+e = lastKill()
+check(e.key == "Guardbait-MyRealm" and e.blow == "other" and e.how:find("fought", 1, true) ~= nil,
+    "enemy who fought you and died to an NPC counts (killing blow: NPC / other)")
+check(ns.db.players["Guardbait-MyRealm"].kb == 0 and ns.db.players["Guardbait-MyRealm"].solo == 1, "solo, but not your killing blow")
+check(chatContains("killing blow: an NPC or the environment"), "chat explains the NPC killing blow")
+MOCK.Fire("PLAYER_REGEN_ENABLED")
+MOCK.Advance(2)
+clearUnits()
+
+section("Feign Death is not a kill")
+enemy("nameplate2", "Player-1-KA6", "Fakedeath", "HUNTER", 23, { targetingMe = true, feign = true })
+MOCK.Fire("UNIT_TARGET", "nameplate2")
+MOCK.Fire("UNIT_DIED", "Player-1-KA6")
+MOCK.Advance(2)
+check(kills("Fakedeath-MyRealm") == 0, "hunter feigning death not counted")
+clearUnits()
+
+section("solo: an enemy dies nearby, the damage meter shows your damage")
+enemy("nameplate3", "Player-1-KA7", "Meterguy", "MAGE", 22)
+MOCK.Fire("NAME_PLATE_UNIT_ADDED", "nameplate3")
+MOCK.Fire("PLAYER_REGEN_DISABLED")
+MOCK.units.nameplate3.dead = true
+MOCK.Fire("UNIT_DIED", "Player-1-KA7")
+MOCK.Advance(2)
+check(kills("Meterguy-MyRealm") == 0, "waits for combat to end to read the damage meter")
+MOCK.meter = { combatSources = { { sourceGUID = "Player-1-KA7", name = "Meterguy", totalAmount = 900 } } }
+MOCK.Fire("PLAYER_REGEN_ENABLED")
+MOCK.Advance(2)
+e = lastKill()
+check(kills("Meterguy-MyRealm") == 1 and e.how:find("meter", 1, true) ~= nil, "counted once the damage meter shows your damage on them")
+
+section("solo: an enemy dies nearby, no damage from you")
+enemy("nameplate4", "Player-1-KA8", "Stranger", "MAGE", 22)
+MOCK.Fire("NAME_PLATE_UNIT_ADDED", "nameplate4")
+MOCK.meter = { combatSources = {} }
+MOCK.Fire("PLAYER_REGEN_DISABLED")
+MOCK.units.nameplate4.dead = true
+MOCK.Fire("UNIT_DIED", "Player-1-KA8")
+MOCK.Advance(2)
+MOCK.Fire("PLAYER_REGEN_ENABLED")
+MOCK.Advance(2)
+check(kills("Stranger-MyRealm") == 0, "not counted when the damage meter shows no damage from you")
+clearUnits()
+
+section("honorable kill message")
+COMBATLOG_HONORGAIN = "%s dies, honorable kill Rank: %s (Estimated Honor Points: %d)"
+enemy("nameplate5", "Player-1-KA9", "Honorguy", "WARRIOR", 25)
+MOCK.Fire("NAME_PLATE_UNIT_ADDED", "nameplate5")
+MOCK.units.nameplate5 = nil
+MOCK.Fire("CHAT_MSG_COMBAT_HONOR_GAIN", "Honorguy dies, honorable kill Rank: Private (Estimated Honor Points: 12)")
+MOCK.Advance(2)
+e = lastKill()
+check(e.key == "Honorguy-MyRealm" and e.how:find("honor", 1, true) ~= nil and e.blow == "other",
+    "honorable kill counted without a killing-blow event")
+check(ns.ParseHonorMessage("Someone-Other Realm dies, honorable kill (Estimated Honor Points: 5)") == "Someone-Other Realm",
+    "parses the honor line without a rank, with a realm")
+check(ns.PatternFromFormat("%s dies, honorable kill Rank: %s (%d)") == "^(.-) dies, honorable kill Rank: ", "honor pattern built from the game's string")
+
+section("honorable kill counter")
+enemy("nameplate6", "Player-1-KB1", "Countme", "ROGUE", 21)
+MOCK.Fire("NAME_PLATE_UNIT_ADDED", "nameplate6")
+MOCK.units.nameplate6.dead = true
+MOCK.Fire("UNIT_DIED", "Player-1-KB1")
+MOCK.hk = MOCK.hk + 1
+MOCK.Fire("PLAYER_PVP_KILLS_CHANGED", "player")
+MOCK.Advance(2)
+check(kills("Countme-MyRealm") == 1, "the honorable kill counter going up credits the death that just happened")
+
+section("your own kill's honor tick is not given to another death")
+victim("Player-1-KB2", "Minekill", "MAGE", 21)
+enemy("nameplate7", "Player-1-KB3", "Bystander2", "MAGE", 21)
+MOCK.Fire("NAME_PLATE_UNIT_ADDED", "nameplate7")
+MOCK.Fire("PARTY_KILL", ME, "Player-1-KB2")
+MOCK.hk = MOCK.hk + 1
+MOCK.Fire("PLAYER_PVP_KILLS_CHANGED", "player")
+MOCK.units.nameplate7.dead = true
+MOCK.Fire("UNIT_DIED", "Player-1-KB3")
+MOCK.Advance(2)
+check(kills("Minekill-MyRealm") == 1 and kills("Bystander2-MyRealm") == 0, "honor tick goes to your own kill, not the bystander")
+clearUnits()
+
+section("battleground: name hidden until the match ends")
+MOCK.instanceType, MOCK.zone, MOCK.bgRaid = "pvp", "Arathi Basin", 15
+MOCK.Fire("PARTY_KILL", ME, "Player-3-BG1")
+MOCK.Advance(5)
+check(#ns.db.unresolved == 1, "kill kept until the name is known")
+check(chatContains("whose name the game is hiding"), "chat says the kill is added later")
+MOCK.score = { ["Player-3-BG1"] = { name = "Hiddenname-Far Realm", classToken = "MAGE", raceName = "Gnome" } }
+MOCK.Fire("PVP_MATCH_COMPLETE")
+MOCK.Advance(2)
+local hn = ns.db.players["Hiddenname-FarRealm"]
+check(hn and hn.kills.bg == 1 and hn.kb == 1 and hn.class == "MAGE" and #ns.db.unresolved == 0,
+    "named from the scoreboard when the match ends, counted as a BG kill")
+check(chatContains("(from earlier in the match)"), "chat marks the late kill")
+
+section("battleground: a teammate's killing blow needs proof you fought")
+MOCK.units.raid1 = { guid = "Player-1-TM1", name = "Teammate", isPlayer = true }
+victim("Player-3-BG2", "Farfighter", "ROGUE", 24, "Far Realm")
+MOCK.Fire("PLAYER_REGEN_DISABLED")
+MOCK.Fire("PARTY_KILL", "Player-1-TM1", "Player-3-BG2")
+MOCK.Advance(2)
+check(kills("Farfighter-FarRealm") == 0, "teammate's kill on someone you never fought: not yours")
+enemy("nameplate1", "Player-3-BG3", "Duelist", "WARRIOR", 25, { targetingMe = true, realmInfo = "Far Realm" })
+MOCK.Fire("UNIT_TARGET", "nameplate1")
+MOCK.Fire("PARTY_KILL", "Player-1-TM1", "Player-3-BG3")
+MOCK.Advance(2)
+e = lastKill()
+check(e.key == "Duelist-FarRealm" and e.blow == "team" and e.blowBy == "Teammate" and e.group == "solo" and e.ctx == "bg",
+    "teammate's kill on someone fighting you counts: killing blow Teammate (team), you solo")
+MOCK.Fire("PLAYER_REGEN_ENABLED")
+MOCK.Advance(2)
+MOCK.instanceType, MOCK.zone, MOCK.bgRaid = nil, nil, nil
+clearUnits()
+
+section("shared kills can be turned off")
+ns.db.settings.countSharedKills = false
+enemy("nameplate2", "Player-1-KB4", "Offswitch", "ROGUE", 21, { targetingMe = true })
+MOCK.Fire("UNIT_TARGET", "nameplate2")
+MOCK.units.nameplate2.dead = true
+MOCK.Fire("UNIT_DIED", "Player-1-KB4")
+MOCK.Advance(2)
+check(kills("Offswitch-MyRealm") == 0, "kill finished by an NPC not counted when the option is off")
+ns.db.settings.countSharedKills = true
+clearUnits()
+
+section("an enemy who only clicked you while you were out of combat")
+MOCK.Advance(10)
+enemy("nameplate3", "Player-1-KB5", "Clicker", "MAGE", 21, { targetingMe = true })
+MOCK.Fire("UNIT_TARGET", "nameplate3")
+MOCK.units.nameplate3.dead = true
+MOCK.Fire("UNIT_DIED", "Player-1-KB5")
+MOCK.Advance(2)
+check(kills("Clicker-MyRealm") == 0, "not counted: you were not in combat when they died")
+clearUnits()
+
+section("buddies command and tooltip")
+SlashCmdList.KILLLISTSTATS("buddies")
+check(chatContains("Kill buddies") and chatContains("Buddy - 3") and chatContains("1. Buddy - 2"),
+    "buddies lists who you killed with, and who took the killing blows")
+GameTooltip._lines = {}
+MOCK.tooltipPostCall(GameTooltip, { guid = "Player-1-KA1" })
+check(table.concat(GameTooltip._lines, "\n"):find("your killing blows / solo", 1, true) ~= nil, "tooltip shows killing blows / solo when someone else finished them")
+
+---------------------------------------------------------------------------
+section("filters and the every-kill view")
+local okF, errF = pcall(function()
+    local F, UI = ns.Filters, ns.UI
+    UI.search:SetText("")
+    UI.search._scripts.OnTextChanged(UI.search)
+    MOCK.Advance(1)
+    SlashCmdList.KILLLISTSTATS("kills")
+    check(UI.frame:IsShown() and UI.tab == 1, "Kills tab open")
+    local all = #UI.pages[1].list
+    print("    players with kills: " .. all)
+    F.Set("group", "solo")
+    check(#UI.pages[1].list == all - 3, "Solo filter hides the 3 players killed while grouped")
+    check(UI.status:GetText():find("Solo", 1, true) ~= nil, "status line names the active filter")
+    check(UI.summary:GetText():find("Filtered", 1, true) ~= nil, "summary marks filtered totals")
+    F.Set("group", "all")
+    F.Set("blow", "party")
+    check(#UI.pages[1].list == 2, "Killing blow = your party: Partyvictim and Petvictim")
+    F.Reset()
+    F.Set("where", "bg")
+    check(#UI.pages[1].list == 3, "Battlegrounds: Flagrunner, Hiddenname, Duelist")
+    F.Reset()
+    check(#UI.pages[1].list == all, "clearing filters shows everyone again")
+
+    -- the menu
+    local menu = MOCK.NewMenu()
+    UI.filterButton._menu(UI.filterButton, menu)
+    check(menu:Find("Quick picks") and menu:Find("Killing blow") and menu:Find("Revenge kills only"), "filter menu built")
+    menu:Find("Battlegrounds").b()
+    check(F.State().where == "bg", "menu radio sets a filter")
+    check(UI.filterButton._isDefault() == false, "filter button shows its reset X")
+    UI.filterButton._default()
+    check(F.IsDefault(), "reset X clears the filters")
+    menu:Find("Solo killing blows").a()
+    check(F.State().group == "solo" and F.State().blow == "mine", "quick pick sets several filters at once")
+    menu = MOCK.NewMenu()
+    UI.filterButton._menu(UI.filterButton, menu)
+    check(menu:Find("Your group: Solo") ~= nil, "submenu title shows the current choice")
+    menu:Find("Clear all filters").a()
+    check(F.IsDefault(), "Clear all filters")
+
+    -- every kill
+    UI.viewButton:Click()
+    check(UI:CurrentPage() == UI.killLog and UI.killLog:IsShown() and not UI.pages[1]:IsShown(), "view button switches to every kill")
+    check(#UI.killLog.list == #ns.db.kills, "every kill view lists every kill")
+    local log = UI.killLog
+    for _, col in ipairs(log.columns) do
+        if col.sort then log:SetSort(col.key); log:SetSort(col.key) end
+    end
+    log:SetSort("time")
+    if log.sortAsc then log:SetSort("time") end
+    log.onEnter(log.list[1])
+    local header = {}
+    for _, col in ipairs(log.columns) do header[#header + 1] = col.title end
+    print("      | " .. table.concat(header, " | "))
+    for i = 1, math.min(log.scrollBox._count or 0, 8) do
+        local cells = {}
+        for _, fs in ipairs(log.scrollBox._rows[i].cells) do
+            cells[#cells + 1] = (fs:GetText() or ""):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+        end
+        print("      | " .. table.concat(cells, " | "))
+    end
+    F.Set("blow", "notmine")
+    local helped = #log.list
+    check(helped == 7, "Anyone but you: 7 kills you only helped with (got " .. helped .. ")")
+    F.Reset()
+    log.scrollBox._rows[1]:Click()
+    UI.buttons.add:Click()
+    UI.viewButton:Click()
+    check(UI:CurrentPage() == UI.pages[1], "view button switches back to by player")
+
+    -- deaths and classes follow the filters
+    UI:SelectTab(2)
+    F.Set("where", "bg")
+    check(#UI.pages[2].list == 1, "deaths filtered to battlegrounds")
+    F.Set("blow", "mine")
+    check(UI.status:GetText():find("only apply to kills", 1, true) ~= nil, "Deaths tab explains kill-only filters")
+    F.Reset()
+    UI:SelectTab(4)
+    F.Set("blow", "mine")
+    local mageMine
+    for _, r in ipairs(UI.pages[4].list) do if r.class == "MAGE" then mageMine = r end end
+    check(mageMine and mageMine.total == mageMine.kb, "classes count only your killing blows when filtered")
+    F.Reset()
+    UI:SelectTab(3)
+    check(not UI.filterButton:IsShown(), "no filter button on the Kill List tab")
+
+    -- predicates
+    local s = F.State()
+    s.time = "week"
+    local since = select(2, F.Begin())
+    check(F.Kill({ t = time() - 10 * 86400 }, s, since) == false and F.Kill({ t = time() }, s, since) == true, "Last 7 days")
+    F.Reset()
+    check(F.LevelBucket(25, nil, 20) == "higher" and F.LevelBucket(21, nil, 20) == "even" and F.LevelBucket(10, nil, 20) == "lower"
+        and F.LevelBucket(nil, true, 20) == "higher", "level buckets")
+    check(#F.Characters() >= 1, "characters listed")
+    SlashCmdList.KILLLISTSTATS("filter")
+    check(F.IsDefault(), "/kls filter clears filters")
+    SlashCmdList.KILLLISTSTATS("log")
+    check(UI:CurrentPage() == UI.killLog, "/kls log opens every kill")
+    UI.frame:Hide()
+end)
+check(okF, "filter UI ran without errors" .. (okF and "" or (": " .. tostring(errF))))
+
 section("reset")
 StaticPopupDialogs.KILLLISTSTATS_RESET.OnAccept()
 check(next(ns.db.players) == nil and #ns.db.deaths == 0, "reset wipes data")

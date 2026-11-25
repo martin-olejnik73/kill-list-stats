@@ -1,10 +1,12 @@
 -- Kill List Stats - Main window
--- Tabs: Kills (your kill database), Deaths (who killed you and why),
--- Kill List (players to get revenge on), Classes (stats by class), Options.
+-- Tabs: Kills (your kill database, by player or every single kill), Deaths
+-- (who killed you and why), Kill List (players to get revenge on), Classes
+-- (stats by class), Options. Kills, Deaths and Classes follow the filters.
 
 local _, ns = ...
 local UI = {}
 ns.UI = UI
+local F = ns.Filters
 
 local ROW_HEIGHT = 18
 local GREY, RED, GREEN, GOLD = "|cffaaaaaa", "|cffff4040", "|cff40ff40", "|cffffd100"
@@ -246,11 +248,39 @@ local function NumOrDash(n)
     return tostring(n)
 end
 
+-- Kills by player. r.st holds the (filtered) numbers: world, bg, kb, solo, deaths, assists, last.
 local function BuildKills(filter)
     local rows = {}
-    for key, p in pairs(ns.db.players) do
-        if Total(p.kills) > 0 and Matches(filter, p.name, p.realm, ns.ClassName(p.class), p.guild) then
-            rows[#rows + 1] = PlayerRow(key, p)
+    local players = ns.db.players
+    for key, st in pairs(F.PlayerStats()) do
+        local p = players[key]
+        local kills = st.world + st.bg
+        if p and kills > 0 and Matches(filter, p.name, p.realm, ns.ClassName(p.class), p.guild) then
+            rows[#rows + 1] = {
+                id = key, key = key, p = p, st = st,
+                sortName = (p.name or ""):lower(),
+                kills = kills, deaths = st.deaths, assists = st.assists,
+            }
+        end
+    end
+    return rows
+end
+
+-- Every single kill (the kill log).
+local function BuildKillLog(filter)
+    local rows = {}
+    local players = ns.db.players
+    local s, since = F.Begin()
+    for i, e in ipairs(ns.db.kills) do
+        if F.Kill(e, s, since) then
+            local p = players[e.key]
+            if Matches(filter, p and p.name, e.key, e.zone, e.subzone, p and ns.ClassName(p.class), p and p.guild,
+                    ns.BlowText(e), e.with and table.concat(e.with, " ")) then
+                rows[#rows + 1] = {
+                    id = "kill" .. i .. ":" .. (e.t or 0), e = e, p = p, key = e.key,
+                    sortName = p and (p.name or ""):lower() or (e.key or ""):lower(),
+                }
+            end
         end
     end
     return rows
@@ -269,9 +299,10 @@ end
 local function BuildDeaths(filter)
     local rows = {}
     local players = ns.db.players
+    local s, since = F.Begin()
     for i, d in ipairs(ns.db.deaths) do
         local kp = d.killer and players[d.killer]
-        if Matches(filter, kp and kp.name, d.zone, d.subzone, kp and ns.ClassName(kp.class), d.reasons and table.concat(d.reasons, " ")) then
+        if F.Death(d, s, since) and Matches(filter, kp and kp.name, d.zone, d.subzone, kp and ns.ClassName(kp.class), d.reasons and table.concat(d.reasons, " ")) then
             rows[#rows + 1] = { id = "death" .. i .. ":" .. (d.t or 0), d = d, kp = kp, key = d.killer, sortName = kp and kp.name:lower() or "" }
         end
     end
@@ -280,21 +311,26 @@ end
 
 local function BuildClasses()
     local byClass, allKills = {}, 0
-    for _, p in pairs(ns.db.players) do
-        local class = p.class or "UNKNOWN"
-        local c = byClass[class]
-        if not c then
-            c = { id = class, class = class, sortName = ns.ClassName(p.class):lower(), world = 0, bg = 0, total = 0, unique = 0, deaths = 0, assists = 0 }
-            byClass[class] = c
+    local players = ns.db.players
+    for key, st in pairs(F.PlayerStats()) do
+        local p = players[key]
+        if p then
+            local class = p.class or "UNKNOWN"
+            local c = byClass[class]
+            if not c then
+                c = { id = class, class = class, sortName = ns.ClassName(p.class):lower(), world = 0, bg = 0, total = 0, kb = 0, unique = 0, deaths = 0, assists = 0 }
+                byClass[class] = c
+            end
+            local k = st.world + st.bg
+            c.world = c.world + st.world
+            c.bg = c.bg + st.bg
+            c.total = c.total + k
+            c.kb = c.kb + st.kb
+            if k > 0 then c.unique = c.unique + 1 end
+            c.deaths = c.deaths + st.deaths
+            c.assists = c.assists + st.assists
+            allKills = allKills + k
         end
-        local k = Total(p.kills)
-        c.world = c.world + (p.kills.world or 0)
-        c.bg = c.bg + (p.kills.bg or 0)
-        c.total = c.total + k
-        if k > 0 then c.unique = c.unique + 1 end
-        c.deaths = c.deaths + Total(p.deaths)
-        c.assists = c.assists + Total(p.assists)
-        allKills = allKills + k
     end
     local rows = {}
     for _, c in pairs(byClass) do
@@ -314,18 +350,70 @@ end
 local function LevelOf(p) return p.level or 0 end
 
 local killColumns = {
-    { key = "name", title = "Player", width = 150, asc = true, sort = function(r) return r.sortName end, text = function(r) return ns.ColoredName(r.p) end },
-    { key = "class", title = "Class", width = 85, asc = true, sort = function(r) return ns.ClassName(r.p.class) end, text = function(r) return "|c" .. ns.ClassColorHex(r.p.class) .. ns.ClassName(r.p.class) .. "|r" end },
-    { key = "level", title = "Lvl", width = 38, align = "CENTER", sort = function(r) return LevelOf(r.p) end, text = function(r) return ns.FormatLevel(r.p.level) end },
-    { key = "world", title = "World", width = 52, align = "RIGHT", sort = function(r) return r.p.kills.world or 0 end, text = function(r) return NumOrDash(r.p.kills.world) end, tip = "Your killing blows on this player outside battlegrounds." },
-    { key = "bg", title = "BG", width = 46, align = "RIGHT", sort = function(r) return r.p.kills.bg or 0 end, text = function(r) return NumOrDash(r.p.kills.bg) end, tip = "Your killing blows on this player in battlegrounds." },
-    { key = "total", title = "Total", width = 50, align = "RIGHT", sort = function(r) return r.kills end, text = function(r) return GREEN .. r.kills .. "|r" end },
-    { key = "deaths", title = "Killed you", width = 72, align = "RIGHT", sort = function(r) return r.deaths * 1000 + r.assists end, text = function(r)
+    { key = "name", title = "Player", width = 140, asc = true, sort = function(r) return r.sortName end, text = function(r) return ns.ColoredName(r.p) end },
+    { key = "class", title = "Class", width = 80, asc = true, sort = function(r) return ns.ClassName(r.p.class) end, text = function(r) return "|c" .. ns.ClassColorHex(r.p.class) .. ns.ClassName(r.p.class) .. "|r" end },
+    { key = "level", title = "Lvl", width = 36, align = "CENTER", sort = function(r) return LevelOf(r.p) end, text = function(r) return ns.FormatLevel(r.p.level) end },
+    { key = "world", title = "World", width = 48, align = "RIGHT", sort = function(r) return r.st.world end, text = function(r) return NumOrDash(r.st.world) end, tip = "Your kills on this player outside battlegrounds." },
+    { key = "bg", title = "BG", width = 40, align = "RIGHT", sort = function(r) return r.st.bg end, text = function(r) return NumOrDash(r.st.bg) end, tip = "Your kills on this player in battlegrounds." },
+    { key = "total", title = "Total", width = 46, align = "RIGHT", sort = function(r) return r.kills end, text = function(r) return GREEN .. r.kills .. "|r" end },
+    { key = "kb", title = "Your KB", width = 60, align = "RIGHT", sort = function(r) return r.st.kb end, text = function(r)
+        if r.st.kb == 0 then return GREY .. "-|r" end
+        return (r.st.kb == r.kills and GREEN or "") .. r.st.kb .. (r.st.kb == r.kills and "|r" or "")
+    end, tip = "Kills where you (or your pet or totem) landed the killing blow. The rest were finished by your party, a battleground teammate, an NPC or the environment. Green = every kill was yours." },
+    { key = "solo", title = "Solo", width = 44, align = "RIGHT", sort = function(r) return r.st.solo end, text = function(r) return NumOrDash(r.st.solo) end,
+        tip = "Kills while you were not in a party or raid. A battleground raid you were put into doesn't count as a group." },
+    { key = "deaths", title = "Killed you", width = 70, align = "RIGHT", sort = function(r) return r.deaths * 1000 + r.assists end, text = function(r)
         if r.deaths == 0 and r.assists == 0 then return GREY .. "-|r" end
         return RED .. r.deaths .. "|r" .. (r.assists > 0 and (GREY .. " +" .. r.assists .. "a|r") or "")
     end, tip = "Killing blows they landed on you (+ assists on your deaths)." },
-    { key = "last", title = "Last kill", width = 82, align = "RIGHT", sort = function(r) return r.p.lastKill or 0 end, text = function(r) return ns.FormatAgo(r.p.lastKill) end },
+    { key = "last", title = "Last kill", width = 78, align = "RIGHT", sort = function(r) return r.st.last or 0 end, text = function(r) return ns.FormatAgo(r.st.last) end },
     { key = "guild", title = "  Guild", asc = true, sort = function(r) return (r.p.guild or "~"):lower() end, text = function(r) return r.p.guild and ("  " .. GREY .. "<" .. r.p.guild .. ">|r") or "" end },
+}
+
+local BLOW_ORDER = { mine = 1, party = 2, team = 3, other = 4 }
+local GROUP_ORDER = { solo = 1, party = 2, raid = 3 }
+
+local function KillNotes(e)
+    local parts = {}
+    if e.revenge then parts[#parts + 1] = GOLD .. "Revenge!|r" end
+    if e.with then parts[#parts + 1] = GREY .. "with " .. table.concat(e.with, ", ") .. "|r" end
+    if not ns.IsOwnBlow(e) and e.how then
+        local how = {}
+        for code in e.how:gmatch("[^,]+") do
+            if code ~= "kb" then how[#how + 1] = code end
+        end
+        if #how > 0 then parts[#parts + 1] = GREY .. "counted: " .. ns.HowText(table.concat(how, ",")) .. "|r" end
+    end
+    return "  " .. table.concat(parts, GREY .. " · |r")
+end
+
+local logColumns = {
+    { key = "time", title = "When", width = 84, sort = function(r) return r.e.t or 0 end, text = function(r) return date("%m/%d %H:%M", r.e.t or 0) end },
+    { key = "where", title = "Where", width = 126, asc = true, sort = function(r) return (r.e.zone or ""):lower() end, text = function(r)
+        return (r.e.ctx == "bg" and "|cff60a0ff" or "") .. (r.e.zone or "?") .. (r.e.ctx == "bg" and "|r" or "")
+    end, tip = "Zone of the kill. Blue = battleground." },
+    { key = "name", title = "Player", width = 126, asc = true, sort = function(r) return r.sortName end, text = function(r)
+        return r.p and ns.ColoredName(r.p) or (r.e.key or "?")
+    end },
+    { key = "class", title = "Class", width = 70, asc = true, sort = function(r) return ns.ClassName(r.p and r.p.class) end, text = function(r)
+        local class = r.p and r.p.class
+        return "|c" .. ns.ClassColorHex(class) .. ns.ClassName(class) .. "|r"
+    end },
+    { key = "level", title = "Lvl", width = 34, align = "CENTER", sort = function(r) return r.e.skull and 999 or (r.e.level or 0) end, text = function(r)
+        return ns.ColoredLevel(r.e.level, r.e.skull, r.e.myLevel)
+    end, tip = "Their level when you killed them, colored against yours (grey = much lower, red = much higher)." },
+    { key = "mylevel", title = "You", width = 34, align = "CENTER", sort = function(r) return r.e.myLevel or 0 end, text = function(r) return tostring(r.e.myLevel or "?") end, tip = "Your level at the time." },
+    { key = "blow", title = "Killing blow", width = 138, asc = true, sort = function(r)
+        return (BLOW_ORDER[ns.BlowKind(r.e)] or 9) .. ns.BlowText(r.e):lower()
+    end, text = function(r) return ns.ColoredBlow(r.e) end,
+        tip = "Who landed the killing blow: you, your pet or totem (green), someone in your party or raid (gold), a battleground teammate (blue), or an NPC, a guard or the environment (grey)." },
+    { key = "group", title = "Your group", width = 80, sort = function(r)
+        return (GROUP_ORDER[r.e.group or "solo"] or 1) * 100 + (r.e.gsize or 1)
+    end, text = function(r)
+        local g = r.e.group or "solo"
+        return (g == "solo" and "" or GOLD) .. ns.GroupText(g, r.e.gsize) .. (g == "solo" and "" or "|r")
+    end, tip = "Whether you were solo or in a party or raid you formed. A battleground raid you were put into counts as solo." },
+    { key = "notes", title = "  Notes", sort = nil, text = function(r) return KillNotes(r.e) end },
 }
 
 local deathColumns = {
@@ -345,8 +433,15 @@ local deathColumns = {
     end, tip = "Your health when the killer started attacking you (from the death recap). Red = you were already hurt. ? = unknown." },
     { key = "assists", title = "Help", width = 40, align = "CENTER", sort = function(r) return r.d.assists and #r.d.assists or 0 end, text = function(r)
         local n = r.d.assists and #r.d.assists or 0
-        return n > 0 and (RED .. "+" .. n .. "|r") or (GREY .. "solo|r")
-    end, tip = "How many other enemy players helped (they each get an assist)." },
+        return n > 0 and (RED .. "+" .. n .. "|r") or (GREY .. "-|r")
+    end, tip = "How many other enemy players helped the killer (they each get an assist)." },
+    { key = "group", title = "Your group", width = 76, sort = function(r)
+        local g, n = ns.DeathGroup(r.d)
+        return (GROUP_ORDER[g] or 1) * 100 + n
+    end, text = function(r)
+        local g, n = ns.DeathGroup(r.d)
+        return (g == "solo" and "" or GOLD) .. ns.GroupText(g, n) .. (g == "solo" and "" or "|r")
+    end, tip = "Whether you were solo or in a party or raid you formed when you died." },
     { key = "why", title = "Why", sort = nil, text = function(r)
         return GREY .. (r.d.reasons and table.concat(r.d.reasons, "; ") or "") .. "|r"
     end },
@@ -388,6 +483,7 @@ local classColumns = {
     { key = "world", title = "World kills", width = 72, align = "RIGHT", sort = function(r) return r.world end, text = function(r) return NumOrDash(r.world) end },
     { key = "bg", title = "BG kills", width = 64, align = "RIGHT", sort = function(r) return r.bg end, text = function(r) return NumOrDash(r.bg) end },
     { key = "total", title = "Total", width = 56, align = "RIGHT", sort = function(r) return r.total end, text = function(r) return GREEN .. r.total .. "|r" end },
+    { key = "kb", title = "Your KB", width = 60, align = "RIGHT", sort = function(r) return r.kb end, text = function(r) return NumOrDash(r.kb) end, tip = "Kills on this class where you (or your pet or totem) landed the killing blow." },
     { key = "pct", title = "% of kills", width = 66, align = "RIGHT", sort = function(r) return r.pct end, text = function(r) return string.format("%.1f%%", r.pct) end },
     { key = "unique", title = "Players", width = 58, align = "RIGHT", sort = function(r) return r.unique end, text = function(r) return NumOrDash(r.unique) end, tip = "Different players of this class you have killed." },
     { key = "deaths", title = "Killed you", width = 70, align = "RIGHT", sort = function(r) return r.deaths end, text = function(r) return r.deaths > 0 and (RED .. r.deaths .. "|r") or (GREY .. "-|r") end },
@@ -406,11 +502,31 @@ local function PlayerTooltip(r)
     ns.AddPlayerLines(GameTooltip, p, true)
 end
 
+local function KillTooltip(r)
+    local e, p = r.e, r.p
+    local function Line(left, right) GameTooltip:AddDoubleLine(left, right, 0.7, 0.7, 0.7, 1, 1, 1) end
+    GameTooltip:AddLine("Killed " .. (p and ns.ColoredName(p) or (e.key or "?")) .. "  " .. GREY .. ns.FormatDate(e.t) .. "|r")
+    Line("Where", (e.zone or "?") .. (e.subzone and e.subzone ~= "" and (" - " .. e.subzone) or "") .. "  " .. CtxTag(e.ctx))
+    Line("Levels", string.format("you %s, them %s", tostring(e.myLevel or "?"), ns.ColoredLevel(e.level, e.skull, e.myLevel)))
+    Line("Killing blow", ns.ColoredBlow(e))
+    local group = ns.GroupText(e.group or "solo", e.gsize)
+    if e.with then group = group .. GREY .. " (with " .. table.concat(e.with, ", ") .. ")|r" end
+    Line("Your group", group)
+    Line("Counted from", ns.HowText(e.how))
+    if e.char then Line("Character", F.CharName(e.char)) end
+    if e.revenge then GameTooltip:AddLine(GOLD .. "Revenge kill: they were on your Kill List.|r") end
+    if p then
+        GameTooltip:AddLine(" ")
+        ns.AddPlayerLines(GameTooltip, p, false)
+    end
+end
+
 local function DeathTooltip(r)
     local d, kp = r.d, r.kp
     GameTooltip:AddLine(string.format("Died %s", ns.FormatDate(d.t)))
     GameTooltip:AddDoubleLine("Where", (d.zone or "?") .. (d.subzone and d.subzone ~= "" and (" - " .. d.subzone) or "") .. "  " .. CtxTag(d.ctx), 0.7, 0.7, 0.7, 1, 1, 1)
     GameTooltip:AddDoubleLine("Your level", tostring(d.myLevel or "?"), 0.7, 0.7, 0.7, 1, 1, 1)
+    GameTooltip:AddDoubleLine("Your group", ns.GroupText(ns.DeathGroup(d)), 0.7, 0.7, 0.7, 1, 1, 1)
     if kp then
         GameTooltip:AddDoubleLine("Killed by", string.format("%s (%s %s)", ns.ColoredName(kp),
             ns.ColoredLevel(d.killerLevel, d.killerSkull, d.myLevel), ns.ClassName(kp.class)), 0.7, 0.7, 0.7, 1, 1, 1)
@@ -454,6 +570,7 @@ end
 local function ClassTooltip(r)
     GameTooltip:AddLine(ns.ClassIcon(r.class ~= "UNKNOWN" and r.class, 16) .. " |c" .. ns.ClassColorHex(r.class) .. ns.ClassName(r.class ~= "UNKNOWN" and r.class or nil) .. "|r")
     GameTooltip:AddDoubleLine("Kills (world / BG)", string.format("%d / %d", r.world, r.bg), 0.7, 0.7, 0.7, 1, 1, 1)
+    GameTooltip:AddDoubleLine("Your killing blows", tostring(r.kb), 0.7, 0.7, 0.7, 1, 1, 1)
     GameTooltip:AddDoubleLine("Different players killed", tostring(r.unique), 0.7, 0.7, 0.7, 1, 1, 1)
     GameTooltip:AddDoubleLine("Killed you / assists", string.format("%d / %d", r.deaths, r.assists), 0.7, 0.7, 0.7, 1, 1, 1)
     -- most killed player of this class
@@ -520,6 +637,7 @@ end
 ---------------------------------------------------------------------------
 
 local TAB_NAMES = { "Kills", "Deaths", "Kill List", "Classes", "Options" }
+local FILTER_TABS = { [1] = true, [2] = true, [4] = true } -- tabs the filters apply to
 
 local function MakeButton(parent, text, width)
     local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
@@ -528,12 +646,30 @@ local function MakeButton(parent, text, width)
     return b
 end
 
+-- Blizzard's "Filter" dropdown (with its reset X), or a plain button that opens
+-- the same menu if that template is missing.
+local function CreateFilterButton(parent)
+    local function Generator(_, root) F.BuildMenu(root) end
+    local ok, dd = pcall(CreateFrame, "DropdownButton", nil, parent, "WowStyle1FilterDropdownTemplate")
+    if ok and dd and dd.SetupMenu then
+        dd:SetupMenu(Generator)
+        if dd.SetIsDefaultCallback then dd:SetIsDefaultCallback(function() return F.IsDefault() end) end
+        if dd.SetDefaultCallback then dd:SetDefaultCallback(function() F.Reset() end) end
+        return dd
+    end
+    local b = MakeButton(parent, "Filter", 90)
+    b:SetScript("OnClick", function(btn)
+        if MenuUtil and MenuUtil.CreateContextMenu then MenuUtil.CreateContextMenu(btn, Generator) end
+    end)
+    return b
+end
+
 function UI:Create()
     if self.frame then return self.frame end
     local f = CreateFrame("Frame", "KillListStatsFrame", UIParent, "ButtonFrameTemplate")
     self.frame = f
     ButtonFrameTemplate_HidePortrait(f)
-    f:SetSize(860, 520)
+    f:SetSize(960, 540)
     f:SetFrameStrata("HIGH")
     f:SetToplevel(true)
     f:SetClampedToScreen(true)
@@ -564,9 +700,9 @@ function UI:Create()
     f:HookScript("OnShow", function() UI:Refresh() end)
     f:Hide()
 
-    -- Search box + summary in the space above the inset.
+    -- Top bar: search, filters, view switch (Kills tab) and the filter status.
     local search = CreateFrame("EditBox", nil, f, "SearchBoxTemplate")
-    search:SetSize(200, 20)
+    search:SetSize(170, 20)
     search:SetPoint("TOPLEFT", f, "TOPLEFT", 18, -32)
     search:HookScript("OnTextChanged", function(box)
         UI.filter = strtrim(box:GetText() or ""):lower()
@@ -574,12 +710,34 @@ function UI:Create()
     end)
     self.search = search
 
-    local summary = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    summary:SetPoint("LEFT", search, "RIGHT", 16, 0)
-    summary:SetPoint("RIGHT", f, "RIGHT", -16, 0)
-    summary:SetJustifyH("RIGHT")
-    summary:SetWordWrap(false)
-    self.summary = summary
+    local filterBtn = CreateFilterButton(f)
+    filterBtn:SetPoint("LEFT", search, "RIGHT", 12, 0)
+    self.filterButton = filterBtn
+
+    self.killView = ns.db.ui.killView == "log" and "log" or "players"
+    local viewBtn = MakeButton(f, "Show every kill", 128)
+    viewBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 345, -31)
+    viewBtn:SetScript("OnClick", function()
+        UI.killView = UI.killView == "log" and "players" or "log"
+        ns.db.ui.killView = UI.killView
+        UI:SelectTab(1)
+    end)
+    viewBtn:SetScript("OnEnter", function(btn)
+        GameTooltip:SetOwner(btn, "ANCHOR_TOP")
+        GameTooltip:SetText("Kills view", 1, 1, 1)
+        GameTooltip:AddLine("By player: one row per player with your totals.", nil, nil, nil, true)
+        GameTooltip:AddLine("Every kill: one row per kill, with who landed the killing blow and whether you were solo or grouped.", nil, nil, nil, true)
+        GameTooltip:Show()
+    end)
+    viewBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    self.viewButton = viewBtn
+
+    local status = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    status:SetPoint("LEFT", f, "TOPLEFT", 484, -42)
+    status:SetPoint("RIGHT", f, "TOPRIGHT", -16, -42)
+    status:SetJustifyH("RIGHT")
+    status:SetWordWrap(false)
+    self.status = status
 
     -- Pages (one per tab) inside the inset.
     local inset = f.Inset
@@ -601,6 +759,12 @@ function UI:Create()
     self.pages[1].onEnter = PlayerTooltip
     self.pages[1].build = BuildKills
 
+    local kl, al = Saved("killlog", "time", false)
+    self.killLog = CreateTable(inset, logColumns, kl, al)
+    self.killLog.onSortChanged = SortSaver("killlog")
+    self.killLog.onEnter = KillTooltip
+    self.killLog.build = BuildKillLog
+
     local k2, a2 = Saved("deaths", "time", false)
     self.pages[2] = CreateTable(inset, deathColumns, k2, a2)
     self.pages[2].onSortChanged = SortSaver("deaths")
@@ -612,7 +776,7 @@ function UI:Create()
     self.pages[3].onSortChanged = SortSaver("list")
     self.pages[3].onEnter = PlayerTooltip
     self.pages[3].build = BuildKillList
-    self.pages[3].empty:SetText("Your Kill List is empty. Players who kill you in the world are added automatically.")
+    self.pages[3].emptyText = "Your Kill List is empty. Players who kill you in the world are added automatically."
 
     local k4, a4 = Saved("classes", "total", false)
     self.pages[4] = CreateTable(inset, classColumns, k4, a4)
@@ -622,7 +786,14 @@ function UI:Create()
 
     self.pages[5] = self:CreateOptions(inset)
 
-    -- Buttons along the bottom.
+    -- Bottom bar: summary on the left, buttons on the right.
+    local summary = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    summary:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 14, 10)
+    summary:SetPoint("RIGHT", f, "BOTTOMRIGHT", -350, 10)
+    summary:SetJustifyH("LEFT")
+    summary:SetWordWrap(false)
+    self.summary = summary
+
     local addBtn = MakeButton(f, "Add to Kill List", 130)
     addBtn:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -8, 4)
     addBtn:SetScript("OnClick", function() UI:AddSelectedToList() end)
@@ -640,11 +811,6 @@ function UI:Create()
     targetBtn:SetScript("OnClick", function() ns:AddTargetToList() end)
     self.buttons = { add = addBtn, remove = removeBtn, note = noteBtn, target = targetBtn }
 
-    local hint = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    hint:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 14, 10)
-    hint:SetText("Click a column to sort. Hover a row for details.")
-    self.hint = hint
-
     -- Tabs
     for i, name in ipairs(TAB_NAMES) do
         local tab = CreateFrame("Button", "KillListStatsFrameTab" .. i, f, "PanelTabButtonTemplate")
@@ -661,47 +827,88 @@ function UI:Create()
     return f
 end
 
+-- The table shown right now (the Kills tab has two views).
+function UI:CurrentPage()
+    if self.tab == 1 and self.killView == "log" then return self.killLog end
+    return self.pages[self.tab]
+end
+
 function UI:SelectTab(id)
     id = math.max(1, math.min(id or 1, #TAB_NAMES))
     self.tab = id
     ns.db.ui.tab = id
     PanelTemplates_SetTab(self.frame, id)
-    for i, page in ipairs(self.pages) do page:SetShown(i == id) end
+    local current = self:CurrentPage()
+    for _, page in ipairs(self.pages) do page:SetShown(page == current) end
+    self.killLog:SetShown(self.killLog == current)
     local b = self.buttons
     b.add:SetShown(id == 1 or id == 2)
     b.add:SetText(id == 2 and "List the killer" or "Add to Kill List")
     b.remove:SetShown(id == 3)
     b.note:SetShown(id == 3)
     b.target:SetShown(id == 3)
+    self.viewButton:SetShown(id == 1)
+    self.viewButton:SetText(self.killView == "log" and "Show by player" or "Show every kill")
+    self.filterButton:SetShown(FILTER_TABS[id] == true)
     self.search:SetShown(id ~= 5)
-    self.hint:SetShown(id ~= 5)
+    self.status:SetShown(id ~= 5)
+    self:Refresh()
+end
+
+function UI:OnFiltersChanged()
+    if self.filterButton and self.filterButton.ValidateResetState then
+        pcall(self.filterButton.ValidateResetState, self.filterButton)
+    end
     self:Refresh()
 end
 
 function UI:UpdateSummary()
-    local kw, kb, deaths, assists, victims, listed, revenge = 0, 0, 0, 0, 0, 0, 0
-    for _, p in pairs(ns.db.players) do
-        kw = kw + (p.kills.world or 0)
-        kb = kb + (p.kills.bg or 0)
-        if Total(p.kills) > 0 then victims = victims + 1 end
-        deaths = deaths + Total(p.deaths)
-        assists = assists + Total(p.assists)
-        if p.list then listed = listed + 1 end
-        revenge = revenge + (p.revenge or 0)
+    local kw, kbg, kb, solo, deaths, victims, revenge, listed = 0, 0, 0, 0, 0, 0, 0, 0
+    local stats, filtered = F.PlayerStats()
+    for _, st in pairs(stats) do
+        kw = kw + st.world
+        kbg = kbg + st.bg
+        kb = kb + st.kb
+        solo = solo + st.solo
+        deaths = deaths + st.deaths
+        revenge = revenge + st.revenge
+        if st.world + st.bg > 0 then victims = victims + 1 end
     end
-    local kills = kw + kb
+    for _, p in pairs(ns.db.players) do
+        if p.list then listed = listed + 1 end
+    end
+    local kills = kw + kbg
     local kd = deaths > 0 and string.format("%.2f", kills / deaths) or (kills > 0 and "perfect" or "-")
     self.summary:SetText(string.format(
-        "Kills %s%d|r (World %d / BG %d)   Players killed %d   Deaths %s%d|r   K/D %s   Kill List %d   Revenge %d",
-        GREEN, kills, kw, kb, victims, RED, deaths, kd, listed, revenge))
+        "%sKills %s%d|r (World %d / BG %d)   Your KB %d   Solo %d   Players %d   Deaths %s%d|r   K/D %s   Revenge %d   Kill List %d",
+        filtered and (GOLD .. "Filtered|r  ") or "", GREEN, kills, kw, kbg, kb, solo, victims, RED, deaths, kd, revenge, listed))
+end
+
+function UI:UpdateStatus()
+    local labels = F.ActiveLabels()
+    if #labels == 0 or not FILTER_TABS[self.tab] then
+        self.status:SetText(GREY .. "Click a column header to sort. Hover a row for details.|r")
+        return
+    end
+    local text = GOLD .. "Filters:|r " .. table.concat(labels, ", ")
+    if self.tab == 2 and F.KillsOnlyActive() then
+        text = text .. GREY .. "  (killing blow and revenge filters only apply to kills)|r"
+    end
+    self.status:SetText(text)
 end
 
 function UI:Refresh()
     local f = self.frame
     if not f or not f:IsShown() then return end
     self:UpdateSummary()
-    local page = self.pages[self.tab]
+    self:UpdateStatus()
+    local page = self:CurrentPage()
     if page and page.build then
+        if FILTER_TABS[self.tab] and not F.IsDefault() then
+            page.empty:SetText("Nothing matches your filters. Use the Filter menu (or its X) to clear them.")
+        else
+            page.empty:SetText(page.emptyText or "Nothing here yet.")
+        end
         page:SetData(page.build(self.filter))
     elseif page and page.Refresh then
         page:Refresh()
@@ -730,7 +937,7 @@ function UI:Toggle(tab)
 end
 
 function UI:AddSelectedToList()
-    local page = self.pages[self.tab]
+    local page = self:CurrentPage()
     local sel = page and page:GetSelected()
     local key = sel and sel.key
     if not key then ns.Print("Select a player first.") return end
@@ -766,6 +973,7 @@ end
 
 local OPTIONS = {
     { "printKills", "Print a chat message when you kill a player" },
+    { "countSharedKills", "Also count kills you helped with (your party, a totem, an NPC or the environment landed the killing blow)" },
     { "printDeaths", "Print who killed you (and why) when a player kills you" },
     { "tooltip", "Show your kill history in player tooltips" },
     { "alertKillList", "Warn me when a Kill List player is nearby (target, mouseover, nameplate)" },
@@ -825,9 +1033,11 @@ function UI:CreateOptions(parent)
     info:SetPoint("BOTTOMLEFT", reset, "TOPLEFT", 0, 12)
     info:SetPoint("RIGHT", page, "RIGHT", -16, 0)
     info:SetJustifyH("LEFT")
-    info:SetText("Kills are your killing blows (yours or your pet's). Deaths use the game's death recap plus enemies seen targeting you. " ..
-        "Inside battlegrounds the game hides enemy names from addons during the match, so BG death details can be incomplete. " ..
-        "Type /kls help for chat commands.")
+    info:SetText("Your own killing blows (and your pet's or totem's) always count as kills. A kill someone else finished counts when " ..
+        "the game gave you an honorable kill, the player was fighting you (targeting you, or your target in combat), your party " ..
+        "finished them while you were in combat in the world, or (solo) the damage meter shows your damage on them. " ..
+        "Deaths use the game's death recap plus enemies seen targeting you. Inside battlegrounds the game hides enemy names " ..
+        "until the match ends, so those kills are added then. Type /kls help for chat commands.")
 
     function page:Refresh()
         for _, cb in ipairs(self.checks) do cb:SetChecked(ns.db.settings[cb.key] and true or false) end

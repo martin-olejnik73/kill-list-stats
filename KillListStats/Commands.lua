@@ -21,10 +21,11 @@ function ns:AddTargetToList(note)
 end
 
 local function PrintPlayer(p)
+    local kills = ns.Total(p.kills)
     ns.Print(string.format("%s - level %s %s%s", ns.ColoredName(p), ns.FormatLevel(p.level), ns.ClassName(p.class),
         p.guild and (" <" .. p.guild .. ">") or ""))
-    ns.Print(string.format("  You killed them %s%s|r (%d world, %d BG), last %s",
-        GREEN, ns.Plural(ns.Total(p.kills), "time"), p.kills.world or 0, p.kills.bg or 0, ns.FormatAgo(p.lastKill)))
+    ns.Print(string.format("  You killed them %s%s|r (%d world, %d BG; %d your killing blow, %d solo), last %s",
+        GREEN, ns.Plural(kills, "time"), p.kills.world or 0, p.kills.bg or 0, p.kb or kills, p.solo or kills, ns.FormatAgo(p.lastKill)))
     ns.Print(string.format("  They killed you %s%s|r (%d world, %d BG), assisted %s",
         RED, ns.Plural(ns.Total(p.deaths), "time"), p.deaths.world or 0, p.deaths.bg or 0, ns.Plural(ns.Total(p.assists), "time")))
     if p.lastDeathText then ns.Print("  Last time: " .. GREY .. p.lastDeathText .. "|r") end
@@ -35,16 +36,44 @@ local function PrintPlayer(p)
 end
 
 local function PrintSummary()
-    local kw, kb, deaths, victims, listed = 0, 0, 0, 0, 0
+    local kw, kbg, own, solo, deaths, victims, listed = 0, 0, 0, 0, 0, 0, 0
     for _, p in pairs(ns.db.players) do
+        local n = ns.Total(p.kills)
         kw = kw + (p.kills.world or 0)
-        kb = kb + (p.kills.bg or 0)
+        kbg = kbg + (p.kills.bg or 0)
+        own = own + (p.kb or n)
+        solo = solo + (p.solo or n)
         deaths = deaths + ns.Total(p.deaths)
-        if ns.Total(p.kills) > 0 then victims = victims + 1 end
+        if n > 0 then victims = victims + 1 end
         if p.list then listed = listed + 1 end
     end
-    ns.Print(string.format("Kills %s%d|r (world %d, BG %d) on %d different players. Killed by players %s%d|r times. Kill List: %d.",
-        GREEN, kw + kb, kw, kb, victims, RED, deaths, listed))
+    ns.Print(string.format("Kills %s%d|r (world %d, BG %d) on %d different players: %d your killing blows, %d solo. Killed by players %s%d|r times. Kill List: %d.",
+        GREEN, kw + kbg, kw, kbg, victims, own, solo, RED, deaths, listed))
+end
+
+-- Who you kill with, and who lands the killing blows on players you fought.
+local function PrintBuddies()
+    local with, blows = {}, {}
+    for _, e in ipairs(ns.db.kills) do
+        for _, name in ipairs(e.with or {}) do with[name] = (with[name] or 0) + 1 end
+        if (e.blow == "party" or e.blow == "team") and e.blowBy then
+            blows[e.blowBy] = (blows[e.blowBy] or 0) + 1
+        end
+    end
+    local function Top(t, label)
+        local rows = {}
+        for name, n in pairs(t) do rows[#rows + 1] = { name = name, n = n } end
+        table.sort(rows, function(a, b) return a.n > b.n end)
+        if #rows == 0 then return end
+        ns.Print(label)
+        for i = 1, math.min(5, #rows) do
+            ns.Print(string.format("  %d. %s - %d", i, rows[i].name, rows[i].n))
+        end
+        return true
+    end
+    local any = Top(with, "Kill buddies (party members you killed players with):")
+    any = Top(blows, "Killing blow takers (finished players you were fighting):") or any
+    if not any then ns.Print("No group kills yet.") end
 end
 
 local function PrintTop(field, label, n)
@@ -87,10 +116,12 @@ local function Help()
     ns.Print("commands (/kls or /killlist):")
     local lines = {
         "/kls - open or close the window",
-        "/kls kills | deaths | list | classes | options - open a tab",
+        "/kls kills | deaths | list | classes | options - open a tab     /kls log - every single kill",
         "/kls stats - short summary in chat",
         "/kls who <name> - your history with a player",
         "/kls top - players you killed most     /kls nemesis - players who killed you most",
+        "/kls buddies - who you kill with, and who takes your killing blows",
+        "/kls filter - clear the window's filters",
         "/kls add [name] [note] - add a player (or your target) to the Kill List",
         "/kls remove <name> - remove a player from the Kill List",
         "/kls note <name> <text> - set a Kill List note",
@@ -126,6 +157,15 @@ SlashCmdList.KILLLISTSTATS = function(msg)
         PrintTop("kills", "Players you killed most:", tonumber(rest) or 10)
     elseif cmd == "nemesis" then
         PrintTop("deaths", "Players who killed you most:", tonumber(rest) or 10)
+    elseif cmd == "buddies" or cmd == "party" then
+        PrintBuddies()
+    elseif cmd == "filter" or cmd == "filters" or cmd == "clear" then
+        ns.Filters.Reset()
+        ns.Print("Filters cleared.")
+    elseif cmd == "log" or cmd == "history" then
+        ns.db.ui.killView = "log"
+        if ns.UI.frame then ns.UI.killView = "log" end
+        ns.UI:Toggle(1)
     elseif cmd == "add" then
         local name, note = rest:match("^(%S*)%s*(.-)$")
         if not name or name == "" then

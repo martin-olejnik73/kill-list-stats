@@ -1,6 +1,7 @@
 -- Kill List Stats - Tracker
--- Detects your kills (PARTY_KILL) and your deaths to players (PLAYER_DEAD +
--- the death recap + enemies seen targeting you), and keeps the records updated.
+-- Watches enemy players around you and detects your deaths to players
+-- (PLAYER_DEAD + the death recap + enemies seen targeting you).
+-- Kills are detected in Kills.lua.
 
 local _, ns = ...
 local Plain, PlainString, PlainNumber, Try = ns.Plain, ns.PlainString, ns.PlainNumber, ns.Try
@@ -21,7 +22,6 @@ local plateKey = {}     -- nameplate token -> key of the Kill List player shown 
 local FLICKER_GAP = 10  -- seconds a nameplate must be gone before a return counts as "came back"
 local UNSEEN_GAP = 60   -- without a nameplate: unseen this long counts as gone
 local MIN_ALERT_GAP = 5 -- never warn about the same player more often than this
-local recentKills = {}  -- victim GUID -> GetTime(), avoids double counting
 local reportedErrors = {}
 
 ---------------------------------------------------------------------------
@@ -108,6 +108,8 @@ local ENGAGE_RESET = 15 -- seconds without targeting you before it counts as a n
 -- When an enemy first locks onto you, remembers what you were doing: how long
 -- you had been in combat and which mob you were fighting.
 local function Observe(unit)
+    -- Kills.lua: remembers enemies you are fighting (works even with hidden names).
+    if ns.NoteFight then pcall(ns.NoteFight, unit, combatStart ~= nil) end
     local ok, info, p = pcall(ns.ObserveUnit, ns, unit)
     if not ok or not info then return end
     if p and p.list then NotePresence(info.key, p, unit) end
@@ -152,78 +154,6 @@ local function StartScanning()
 end
 local function StopScanning()
     if scanTicker then scanTicker:Cancel(); scanTicker = nil end
-end
-
----------------------------------------------------------------------------
--- Kills
----------------------------------------------------------------------------
-
-function ns:RecordKill(ev, attempt)
-    local info = self:InfoFromGUID(ev.guid)
-    if not info then
-        if attempt < 4 then
-            C_Timer.After(1, function() ns:RecordKill(ev, attempt + 1) end)
-        else
-            ns.Debug("Could not identify the player you killed:", ev.guid)
-        end
-        return
-    end
-
-    local p = self:GetPlayer(info.key, true, info.name, info.realm)
-    self:ApplyInfo(p, info)
-    p.kills[ev.ctx] = (p.kills[ev.ctx] or 0) + 1
-    p.lastKill = ev.t
-    p.lastKillZone = ev.zone
-    p.lastSeen = ev.t
-    p.lastSeenZone = ev.zone
-
-    local revenge = p.list ~= nil
-    if revenge then
-        p.revenge = (p.revenge or 0) + 1
-        p.list.lastRevenge = ev.t
-    end
-
-    self:AppendLog(self.db.kills, {
-        t = ev.t, key = info.key, ctx = ev.ctx, zone = ev.zone, subzone = ev.subzone,
-        myLevel = ev.myLevel, level = info.level, skull = info.skull,
-        pet = ev.byPet or nil, revenge = revenge or nil, char = self.myKey,
-    })
-
-    if self.db.settings.printKills then
-        local total = ns.Total(p.kills)
-        local msg = string.format("|cff40ff40Killed|r %s (%s %s) - %s kill (%d world, %d BG)%s",
-            ns.ColoredName(p), ns.FormatLevel(info.level, info.skull), ns.ClassName(p.class),
-            ns.Ordinal(total), p.kills.world or 0, p.kills.bg or 0, ev.byPet and " [pet]" or "")
-        if revenge then
-            local deaths = ns.Total(p.deaths)
-            msg = msg .. string.format("  |cffff4040REVENGE!|r (%d revenge kill%s, they killed you %d time%s)",
-                p.revenge, p.revenge == 1 and "" or "s", deaths, deaths == 1 and "" or "s")
-        end
-        ns.Print(msg)
-    end
-    self:NotifyChanged()
-end
-
-function tracker:PARTY_KILL(attackerGUID, victimGUID)
-    local attacker, victim = PlainString(attackerGUID), PlainString(victimGUID)
-    ns.Debug("PARTY_KILL", attacker or "<hidden>", victim or "<hidden>")
-    if not attacker or not victim or not ns.IsPlayerGUID(victim) then return end
-
-    local me = PlainString(UnitGUID("player"))
-    local pet = PlainString(Try(UnitGUID, "pet"))
-    local byPet = pet ~= nil and attacker == pet
-    if attacker ~= me and not byPet then return end
-
-    local now = GetTime()
-    if recentKills[victim] and now - recentKills[victim] < 3 then return end
-    recentKills[victim] = now
-
-    local ctx = ns.GetContext()
-    ns:RecordKill({
-        guid = victim, byPet = byPet, ctx = ctx, t = time(),
-        zone = PlainString(GetRealZoneText()), subzone = PlainString(GetSubZoneText()),
-        myLevel = UnitLevel("player"),
-    }, 1)
 end
 
 ---------------------------------------------------------------------------
@@ -374,7 +304,9 @@ function tracker:PLAYER_DEAD()
     end
 
     deathSerial = deathSerial + 1
+    local party, psize = ns.GroupState()
     local ev = {
+        party = party, psize = psize,
         serial = deathSerial,
         t = time(), gt = now, ctx = ctx,
         myLevel = UnitLevel("player"),
@@ -627,7 +559,7 @@ function ns:ProcessDeath(ev, attempt)
 
     local death = {
         t = ev.t, char = self.myKey, ctx = ev.ctx, zone = ev.zone, subzone = ev.subzone,
-        myLevel = myLevel, group = ev.group, combatTime = ev.combatTime,
+        myLevel = myLevel, group = ev.group, party = ev.party, psize = ev.psize, combatTime = ev.combatTime,
         killer = killer.key, killerClass = kp.class, killerLevel = kLevel, killerSkull = kSkull,
         kbSpell = killer.kb and kbRec and kbRec.spell or killer.spell, kbAmount = killer.kb and kbRec and kbRec.amount or nil,
         kbOther = kbOther, guessed = guessed, enemies = enemies,
@@ -747,7 +679,7 @@ end)
 
 for _, event in ipairs({
     "ADDON_LOADED", "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD",
-    "PARTY_KILL", "PLAYER_DEAD",
+    "PLAYER_DEAD",
     "PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED",
     "PLAYER_TARGET_CHANGED", "UPDATE_MOUSEOVER_UNIT", "NAME_PLATE_UNIT_ADDED", "NAME_PLATE_UNIT_REMOVED", "UNIT_TARGET",
 }) do

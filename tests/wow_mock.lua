@@ -25,7 +25,10 @@ strtrim = function(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end
 tinsert = table.insert
 unpack = unpack or table.unpack
 date = os.date
-time = function() return 1700000000 + math.floor(MOCK.now) end
+time = function(t)
+    if t then return os.time(t) end
+    return 1700000000 + math.floor(MOCK.now)
+end
 GetTime = function() return MOCK.now end
 
 -- Moves the clock forward, running timers in order at their due time.
@@ -85,8 +88,35 @@ function UnitIsUnit(a, b)
 end
 function UnitAffectingCombat() return false end
 function UnitPlayerControlled(unit) local u = U(unit); return u ~= nil and (u.isPlayer or u.playerControlled) == true end
-function IsInGroup() return MOCK.group ~= nil end
-function GetNumGroupMembers() return MOCK.group or 0 end
+function UnitIsFeignDeath(unit) local u = U(unit); return u ~= nil and u.feign == true end
+function UnitIsDeadOrGhost(unit) local u = U(unit); return u ~= nil and u.dead == true end
+
+-- Groups: MOCK.group = size of your own party/raid (nil = solo), MOCK.raid = true
+-- for a raid, MOCK.bgRaid = size of the battleground raid you were put into.
+LE_PARTY_CATEGORY_HOME, LE_PARTY_CATEGORY_INSTANCE = 1, 2
+function IsInGroup(cat)
+    if cat == 2 then return MOCK.bgRaid ~= nil end
+    if cat == 1 then return MOCK.group ~= nil end
+    return MOCK.group ~= nil or MOCK.bgRaid ~= nil
+end
+function IsInRaid(cat)
+    if cat == 2 then return MOCK.bgRaid ~= nil end
+    if cat == 1 then return MOCK.raid == true end
+    return MOCK.raid == true or MOCK.bgRaid ~= nil
+end
+function GetNumGroupMembers(cat)
+    if cat == 2 then return MOCK.bgRaid or 0 end
+    if cat == 1 then return MOCK.group or 0 end
+    return MOCK.bgRaid or MOCK.group or 0
+end
+
+MOCK.hk = 0
+function GetPVPSessionStats() return MOCK.hk, 0 end
+C_PvP = { GetScoreInfoByPlayerGuid = function(guid) return MOCK.score and MOCK.score[guid] end }
+C_DamageMeter = {
+    GetCombatSessionFromType = function(sessionType, meterType) return MOCK.meter end,
+}
+MenuResponse = { Close = 1, Refresh = 2 }
 
 function GetPlayerInfoByGUID(guid)
     local i = MOCK.guidInfo[guid]
@@ -173,6 +203,10 @@ function Methods:GetPoint() return "CENTER", nil, "CENTER", 10, 20 end
 function Methods:CreateFontString() return NewObject("FontString", self) end
 function Methods:CreateTexture() return NewObject("Texture", self) end
 function Methods:Click() if self._scripts.OnClick then self._scripts.OnClick(self, "LeftButton") end end
+-- DropdownButton
+function Methods:SetupMenu(gen) self._menu = gen end
+function Methods:SetIsDefaultCallback(fn) self._isDefault = fn end
+function Methods:SetDefaultCallback(fn) self._default = fn end
 
 -- ScrollBox behaviour: initialize one row per element.
 function Methods:SetDataProvider(dp)
@@ -238,7 +272,42 @@ function GameTooltip:SetOwner() self._lines = {} end
 function GameTooltip:SetText(t) self._lines = { t } end
 function GameTooltip:GetUnit() return nil, MOCK.tooltipUnit end
 
-Enum = { TooltipDataType = { Unit = 2 } }
+Enum = {
+    TooltipDataType = { Unit = 2 },
+    DamageMeterType = { DamageDone = 0, EnemyDamageTaken = 10 },
+    DamageMeterSessionType = { Overall = 0, Current = 1, Expired = 2 },
+}
+
+-- A fake menu description: records what the generator builds so tests can click it.
+function MOCK.NewMenu()
+    local m = { items = {} }
+    local function Add(kind, text, a, b, value)
+        local item = { kind = kind, text = text, a = a, b = b, value = value, items = {} }
+        table.insert(m.items, item)
+        local sub = MOCK.NewMenu()
+        item.sub = sub
+        item.CreateButton = function(self, ...) return sub:CreateButton(...) end
+        item.CreateRadio = function(self, ...) return sub:CreateRadio(...) end
+        item.CreateCheckbox = function(self, ...) return sub:CreateCheckbox(...) end
+        item.CreateTitle = function(self, ...) return sub:CreateTitle(...) end
+        item.CreateDivider = function(self, ...) return sub:CreateDivider(...) end
+        return item
+    end
+    function m:CreateButton(text, fn) return Add("button", text, fn) end
+    function m:CreateRadio(text, isSel, setSel, value) return Add("radio", text, isSel, setSel, value) end
+    function m:CreateCheckbox(text, isSel, setSel) return Add("checkbox", text, isSel, setSel) end
+    function m:CreateTitle(text) return Add("title", text) end
+    function m:CreateDivider() return Add("divider", "") end
+    -- Finds an item by (part of) its text, searching submenus too.
+    function m:Find(text)
+        for _, it in ipairs(self.items) do
+            if it.text and it.text:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):find(text, 1, true) then return it end
+            local found = it.sub:Find(text)
+            if found then return found end
+        end
+    end
+    return m
+end
 TooltipDataProcessor = {
     AddTooltipPostCall = function(kind, fn) MOCK.tooltipPostCall = fn end,
 }

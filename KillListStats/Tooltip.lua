@@ -14,6 +14,10 @@ function ns.AddPlayerLines(tt, p, detailed)
         tt:AddDoubleLine(GREEN .. "You killed them|r",
             string.format("%d  " .. GREY .. "(%d world / %d BG)|r", kills, p.kills.world or 0, p.kills.bg or 0),
             1, 1, 1, 1, 1, 1)
+        local kb, solo = p.kb or kills, p.solo or kills
+        if detailed or kb < kills then
+            tt:AddDoubleLine(GREY .. "  your killing blows / solo|r", string.format("%d / %d", kb, solo), 1, 1, 1, 1, 1, 1)
+        end
     end
     if deaths > 0 or assists > 0 then
         local right = string.format("%d", deaths)
